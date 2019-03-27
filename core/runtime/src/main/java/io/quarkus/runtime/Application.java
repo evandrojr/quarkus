@@ -44,6 +44,7 @@ public abstract class Application {
     private final Lock stateLock = Locks.reentrantLock();
     private final Condition stateCond = stateLock.newCondition();
 
+    //Guarded by stateLock
     private int state = ST_INITIAL;
     private volatile boolean shutdownRequested;
 
