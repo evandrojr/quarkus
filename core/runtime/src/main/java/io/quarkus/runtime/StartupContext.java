@@ -56,6 +56,7 @@ public class StartupContext implements Closeable {
         Collections.reverse(toClose);
         for (Runnable r : toClose) {
             try {
+                System.out.println("Going to run : `" + r.getClass() + "` tostring: " + r.toString());
                 r.run();
             } catch (Throwable e) {
                 LOG.error("Running a shutdown task failed", e);

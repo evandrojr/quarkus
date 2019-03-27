@@ -266,7 +266,13 @@ public class UndertowDeploymentTemplate {
                 shutdown.addShutdownTask(new Runnable() {
                     @Override
                     public void run() {
-                        undertow.stop();
+                        System.out.println("Stopping Undertow:");
+                        try {
+                            undertow.stop();
+                        } catch (Exception we) {
+                            we.printStackTrace();
+                        }
+                        System.out.println("Stopped Undertow.");
                         undertow = null;
                     }
                 });
@@ -276,11 +282,15 @@ public class UndertowDeploymentTemplate {
             @Override
             public void run() {
                 try {
+                    System.out.println("Stopping Undertow Manager:");
                     manager.stop();
+                    System.out.println("Stopped Undertow Manager.");
                 } catch (ServletException e) {
                     log.error("Failed to stop deployment", e);
                 }
+                System.out.println("Undeploying Undertow Manager:");
                 manager.undeploy();
+                System.out.println("Undeployed Undertow Manager.");
             }
         });
         HttpHandler main = manager.getDeployment().getHandler();

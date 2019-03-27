@@ -91,7 +91,9 @@ public abstract class Application {
             stateLock.unlock();
         }
         try {
+            System.out.println("Before (generated) doStart(args)");
             doStart(args);
+            System.out.println("After (generated) doStart(args)");
         } catch (Throwable t) {
             stateLock.lock();
             try {
@@ -109,6 +111,7 @@ public abstract class Application {
         } finally {
             stateLock.unlock();
         }
+        System.out.println("Done starting");
     }
 
     protected abstract void doStart(String[] args);
@@ -119,6 +122,7 @@ public abstract class Application {
      * stop, that exception is propagated.
      */
     public final void stop() {
+        System.out.println("Invoking Application#stop()");
         final Lock stateLock = this.stateLock;
         stateLock.lock();
         try {
@@ -128,6 +132,7 @@ public abstract class Application {
                         throw new IllegalStateException("The application has not been started");
                     case ST_STARTING: {
                         try {
+                            System.out.println("Stop waiting on ST_STARTING");
                             stateCond.await();
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
@@ -138,6 +143,7 @@ public abstract class Application {
                     case ST_STARTED:
                         break loop; // normal shutdown
                     case ST_STOPPING: {
+                        System.out.println("Stop waiting on ST_STOPPING");
                         try {
                             stateCond.await();
                         } catch (InterruptedException e) {
@@ -158,9 +164,13 @@ public abstract class Application {
         }
         Timing.staticInitStopped();
         try {
+            System.out.println("Invoking Application#doStop()");
             doStop();
+            System.out.println("After Invoking Application#doStop()");
         } finally {
+            System.out.println("Acquiring lock on stateLock");
             stateLock.lock();
+            System.out.println("Got the lock on stateLock");
             try {
                 state = ST_STOPPED;
                 Timing.printStopTime();
@@ -177,6 +187,7 @@ public abstract class Application {
      * Run the application as if it were in a standalone JVM.
      */
     public final void run(String[] args) {
+        System.out.println("Invoking Application#run(String[] args)");
         try {
             if (ImageInfo.inImageRuntimeCode()) {
                 final SignalHandler handler = new SignalHandler() {
@@ -211,6 +222,7 @@ public abstract class Application {
     }
 
     private void exit() {
+        System.out.println("Invoking Application#exit()");
         stateLock.lock();
         try {
             System.out.flush();
