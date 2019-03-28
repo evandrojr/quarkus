@@ -150,6 +150,7 @@
         <jetty.version>9.4.15.v20190215</jetty.version>
         <flyway.version>5.2.4</flyway.version>
         <yasson.version>1.0.3</yasson.version>
+        <neo4j-java-driver.version>1.7.2</neo4j-java-driver.version>
     </properties>
 
     <dependencyManagement>
@@ -425,6 +426,11 @@
             <dependency>
                 <groupId>io.quarkus</groupId>
                 <artifactId>quarkus-kubernetes</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.quarkus</groupId>
+                <artifactId>quarkus-neo4j</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
@@ -1414,6 +1420,11 @@
                 <groupId>com.microsoft.sqlserver</groupId>
                 <artifactId>mssql-jdbc</artifactId>
                 <version>${mssql-jdbc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.neo4j.driver</groupId>
+                <artifactId>neo4j-java-driver</artifactId>
+                <version>${neo4j-java-driver.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.vertx</groupId>
