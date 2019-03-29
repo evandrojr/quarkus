@@ -28,6 +28,7 @@ public final class FeatureBuildItem extends MultiBuildItem {
     public static final String JDBC_MSSQL = "jdbc-mssql";
     public static final String KOTLIN = "kotlin";
     public static final String NARAYANA_JTA = "narayana-jta";
+    public static final String NEO4J = "neo4j";
     public static final String RESTEASY = "resteasy";
     public static final String RESTEASY_JSONB = "resteasy-jsonb";
     public static final String SCHEDULER = "scheduler";

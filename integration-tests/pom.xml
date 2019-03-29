@@ -57,6 +57,7 @@
         <module>camel-aws-s3</module>
         <module>flyway</module>
         <module>test-extension</module>
+        <module>neo4j</module>
     </modules>
 
     <build>
