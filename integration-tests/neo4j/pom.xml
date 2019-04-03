@@ -193,6 +193,7 @@
             </properties>
             <build>
                 <plugins>
+                    <!-- See the README to run the same container w/o Maven -->
                     <plugin>
                         <groupId>io.fabric8</groupId>
                         <artifactId>docker-maven-plugin</artifactId>
