@@ -31,7 +31,7 @@
     <description>Module that contains Neo4j related tests running in strict mode with the Neo4j database</description>
 
     <properties>
-        <neo4j.uri>bolt://localhost:7687</neo4j.uri>
+        <neo4j.uri>bolt://localhost:60513</neo4j.uri>
         <neo4j.username>neo4j</neo4j.username>
         <neo4j.password>music</neo4j.password>
     </properties>
