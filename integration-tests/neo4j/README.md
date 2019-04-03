@@ -23,5 +23,5 @@ you'll probably want to change the authentication password too: `-Dneo4j.passwor
 To run the Neo4j docker instance directly (useful to debug this):
 
 ```
-docker run --ulimit memlock=-1:-1 -it --rm=true --memory-swappiness=0 --name quarkus_test_neo4j -e NEO4J_AUTH=neo4j/music -e NEO4J_dbms_memory_pagecache_size=10M -e NEO4J_dbms_memory_heap_initial__size=10M  -p 60513:7687 neo4j:3.5.
+docker run --ulimit memlock=-1:-1 -it --rm=true --memory-swappiness=0 --name quarkus_test_neo4j -e NEO4J_AUTH=neo4j/music -e NEO4J_dbms_memory_pagecache_size=10M -e NEO4J_dbms_memory_heap_initial__size=10M  -p 60513:7687 neo4j:3.5.3
 ```

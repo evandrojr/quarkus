@@ -169,6 +169,7 @@
                                     <reportErrorsAtRuntime>false</reportErrorsAtRuntime>
                                     <cleanupServer>true</cleanupServer>
                                     <enableHttpUrlHandler>true</enableHttpUrlHandler>
+                                    <enableHttpsUrlHandler>true</enableHttpsUrlHandler>
                                     <graalvmHome>${graalvmHome}</graalvmHome>
                                     <enableJni>true</enableJni>
                                     <debugBuildProcess>false</debugBuildProcess>
