@@ -80,7 +80,7 @@ public class SubstrateAutoFeatureStep {
                         ofMethod(Class.class, "forName", Class.class, String.class, boolean.class, ClassLoader.class),
                         tc.load(i), tc.load(false), cl);
                 tc.writeArrayValue(array, 0, clazz);
-                tc.invokeStaticMethod(MethodDescriptor.ofMethod("org.graalvm.nativeimage.RuntimeClassInitialization",
+                tc.invokeStaticMethod(MethodDescriptor.ofMethod("org.graalvm.nativeimage.hosted.RuntimeClassInitialization",
                         "initializeAtRunTime", void.class, Class[].class), array);
 
                 CatchBlockCreator cc = tc.addCatch(Throwable.class);
@@ -102,7 +102,7 @@ public class SubstrateAutoFeatureStep {
                         ofMethod(Class.class, "forName", Class.class, String.class, boolean.class, ClassLoader.class),
                         tc.load(i), tc.load(false), cl);
                 tc.writeArrayValue(array, 0, clazz);
-                tc.invokeStaticMethod(MethodDescriptor.ofMethod("org.graalvm.nativeimage.RuntimeClassInitialization",
+                tc.invokeStaticMethod(MethodDescriptor.ofMethod("org.graalvm.nativeimage.hosted.RuntimeClassInitialization",
                         "rerunClassInitialization", void.class, Class[].class), array);
 
                 CatchBlockCreator cc = tc.addCatch(Throwable.class);
