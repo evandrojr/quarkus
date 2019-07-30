@@ -132,6 +132,10 @@ public class FastBootMetadataBuilder {
 
         // Build the "standard" service registry
         ssrBuilder.applySettings(buildTimeSettings.getSettings());
+
+        //Hardcoded Quarkus overrides:
+        ssrBuilder.applySetting(AvailableSettings.ALLOW_ENHANCEMENT_AS_PROXY, Boolean.TRUE.toString());
+
         this.standardServiceRegistry = ssrBuilder.build();
         registerIdentifierGenerators(standardServiceRegistry);
 
