@@ -136,6 +136,10 @@ public class FastBootMetadataBuilder {
         //Hardcoded Quarkus overrides:
         ssrBuilder.applySetting(AvailableSettings.ALLOW_ENHANCEMENT_AS_PROXY, Boolean.TRUE.toString());
 
+        ssrBuilder.applySetting(AvailableSettings.ORDER_UPDATES, Boolean.TRUE.toString());
+        ssrBuilder.applySetting(AvailableSettings.ORDER_INSERTS, Boolean.TRUE.toString());
+        ssrBuilder.applySetting(AvailableSettings.CONNECTION_PROVIDER_DISABLES_AUTOCOMMIT, Boolean.TRUE.toString());
+
         this.standardServiceRegistry = ssrBuilder.build();
         registerIdentifierGenerators(standardServiceRegistry);
 
