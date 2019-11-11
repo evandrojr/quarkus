@@ -34,6 +34,13 @@
             <artifactId>quarkus-arc-deployment</artifactId>
         </dependency>
 
+        <!-- Byte Buddy is used during augmentation: it's excluded from runtime, so needs to be added here explicitly -->
+        <dependency>
+            <groupId>net.bytebuddy</groupId>
+            <artifactId>byte-buddy</artifactId>
+            <version>1.10.2</version>
+        </dependency>
+
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-junit5-internal</artifactId>
