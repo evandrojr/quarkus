@@ -772,7 +772,7 @@
                 <version>${jboss-logmanager.version}</version>
                 <exclusions>
                     <exclusion>
-                        <groupId>com.oracle.substratevm</groupId>
+                        <groupId>org.graalvm.nativeimage</groupId>
                         <artifactId>svm</artifactId>
                     </exclusion>
                     <exclusion>
@@ -1513,7 +1513,7 @@
             </dependency>
 
             <dependency>
-                <groupId>com.oracle.substratevm</groupId>
+                <groupId>org.graalvm.nativeimage</groupId>
                 <artifactId>svm</artifactId>
                 <version>${graal-sdk.version}</version>
                 <scope>provided</scope>
