@@ -159,7 +159,7 @@ public class FastBootMetadataBuilder {
                     standardServiceRegistry.getService(postBuildProvidedService)));
         }
 
-        final MetadataSources metadataSources = new MetadataSources(bsr);
+        final CustomizedMetadataSources metadataSources = new CustomizedMetadataSources(bsr);
         addPUManagedClassNamesToMetadataSources(persistenceUnit, metadataSources);
 
         this.metamodelBuilder = (MetadataBuilderImplementor) metadataSources
