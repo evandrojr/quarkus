@@ -12,6 +12,7 @@ import javax.persistence.spi.PersistenceUnitInfo;
 import javax.persistence.spi.ProviderUtil;
 import javax.sql.DataSource;
 
+import io.quarkus.hibernate.orm.runtime.datasource.QuarkusConnectionProvider;
 import org.hibernate.boot.registry.StandardServiceRegistry;
 import org.hibernate.boot.registry.internal.StandardServiceRegistryImpl;
 import org.hibernate.boot.spi.MetadataImplementor;
@@ -267,7 +268,8 @@ final class FastBootHibernatePersistenceProvider implements PersistenceProvider 
             throw new IllegalStateException("No datasource has been defined for persistence unit " + persistenceUnitName);
         }
 
-        runtimeSettingsBuilder.put(AvailableSettings.DATASOURCE, Arc.container().instance(DataSource.class).get());
+        QuarkusConnectionProvider cp = new QuarkusConnectionProvider(Arc.container().instance(DataSource.class).get());
+        runtimeSettingsBuilder.put(AvailableSettings.DATASOURCE, cp);
     }
 
     private final ProviderUtil providerUtil = new ProviderUtil() {
