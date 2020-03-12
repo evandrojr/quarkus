@@ -21,7 +21,8 @@ import io.restassured.RestAssured;
 
 public class PrincipalInjectionUnitTest {
     private static Class[] testClasses = {
-            PrincipalInjectionEndpoint.class
+            PrincipalInjectionEndpoint.class,
+            TokenUtils.class
     };
     /**
      * The test generated JWT token string
@@ -36,6 +37,9 @@ public class PrincipalInjectionUnitTest {
     static final QuarkusUnitTest config = new QuarkusUnitTest()
             .setArchiveProducer(() -> ShrinkWrap.create(JavaArchive.class)
                     .addClasses(testClasses)
+                    .addAsResource("publicKey.pem")
+                    .addAsResource("privateKey.pem")
+                    .addAsResource("Token1.json")
                     .addAsResource("application.properties"));
 
     @BeforeEach
@@ -50,10 +54,9 @@ public class PrincipalInjectionUnitTest {
     /**
      * Verify that the injected authenticated principal is as expected
      *
-     * @throws Exception
      */
     @Test()
-    public void verifyInjectedPrincipal() throws Exception {
+    public void verifyInjectedPrincipal() {
         io.restassured.response.Response response = RestAssured.given().auth()
                 .oauth2(token)
                 .when()

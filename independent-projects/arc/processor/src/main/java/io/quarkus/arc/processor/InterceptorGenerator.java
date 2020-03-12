@@ -1,21 +1,6 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.arc.processor;
 
+import static io.quarkus.arc.processor.IndexClassLookupUtils.getClassByName;
 import static org.objectweb.asm.Opcodes.ACC_FINAL;
 import static org.objectweb.asm.Opcodes.ACC_PRIVATE;
 import static org.objectweb.asm.Opcodes.ACC_PUBLIC;
@@ -40,6 +25,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import javax.enterprise.inject.spi.InterceptionType;
 import javax.interceptor.InvocationContext;
 import org.jboss.jandex.AnnotationInstance;
@@ -77,10 +63,10 @@ public class InterceptorGenerator extends BeanGenerator {
         } else {
             baseName = DotNames.simpleName(interceptorClass);
         }
-        ClassInfo providerClass = interceptor.getDeployment().getIndex().getClassByName(providerType.name());
+        ClassInfo providerClass = getClassByName(interceptor.getDeployment().getIndex(), providerType.name());
         String providerTypeName = providerClass.name().toString();
         String targetPackage = DotNames.packageName(providerType.name());
-        String generatedName = targetPackage.replace('.', '/') + "/" + baseName + BEAN_SUFFIX;
+        String generatedName = generatedNameFromTarget(targetPackage, baseName, BEAN_SUFFIX);
 
         boolean isApplicationClass = applicationClassPredicate.test(interceptor.getBeanClass());
         ResourceClassOutput classOutput = new ResourceClassOutput(isApplicationClass,
@@ -88,7 +74,7 @@ public class InterceptorGenerator extends BeanGenerator {
 
         // MyInterceptor_Bean implements InjectableInterceptor<T>
         ClassCreator interceptorCreator = ClassCreator.builder().classOutput(classOutput).className(generatedName)
-                .interfaces(InjectableInterceptor.class)
+                .interfaces(InjectableInterceptor.class, Supplier.class)
                 .build();
 
         // Fields
@@ -103,14 +89,14 @@ public class InterceptorGenerator extends BeanGenerator {
 
         createProviderFields(interceptorCreator, interceptor, injectionPointToProviderField, interceptorToProviderField);
         createConstructor(classOutput, interceptorCreator, interceptor, baseName, injectionPointToProviderField,
-                interceptorToProviderField,
-                bindings.getFieldDescriptor());
+                interceptorToProviderField, bindings.getFieldDescriptor(), reflectionRegistration);
 
         implementGetIdentifier(interceptor, interceptorCreator);
+        implementSupplierGet(interceptorCreator);
         implementCreate(classOutput, interceptorCreator, interceptor, providerTypeName, baseName, injectionPointToProviderField,
                 interceptorToProviderField,
                 reflectionRegistration, targetPackage, isApplicationClass);
-        implementGet(interceptor, interceptorCreator, providerTypeName);
+        implementGet(interceptor, interceptorCreator, providerTypeName, baseName);
         implementGetTypes(interceptorCreator, beanTypes.getFieldDescriptor());
         implementGetBeanClass(interceptor, interceptorCreator);
         // Interceptors are always @Dependent and have always default qualifiers
@@ -129,11 +115,11 @@ public class InterceptorGenerator extends BeanGenerator {
     protected void createConstructor(ClassOutput classOutput, ClassCreator creator, InterceptorInfo interceptor,
             String baseName,
             Map<InjectionPointInfo, String> injectionPointToProviderField,
-            Map<InterceptorInfo, String> interceptorToProviderField, FieldDescriptor bindings) {
+            Map<InterceptorInfo, String> interceptorToProviderField, FieldDescriptor bindings,
+            ReflectionRegistration reflectionRegistration) {
 
         MethodCreator constructor = initConstructor(classOutput, creator, interceptor, baseName, injectionPointToProviderField,
-                interceptorToProviderField,
-                annotationLiterals);
+                interceptorToProviderField, annotationLiterals, reflectionRegistration);
 
         // Bindings
         // bindings = new HashSet<>()
@@ -226,7 +212,14 @@ public class InterceptorGenerator extends BeanGenerator {
             BranchResult result = intercept.ifNonZero(
                     intercept.invokeVirtualMethod(MethodDescriptors.OBJECT_EQUALS, enumValue, intercept.getMethodParam(0)));
             BytecodeCreator trueBranch = result.trueBranch();
-            Class<?> retType = InterceptionType.AROUND_INVOKE.equals(interceptionType) ? Object.class : void.class;
+            Class<?> retType = null;
+            if (InterceptionType.AROUND_INVOKE.equals(interceptionType)) {
+                retType = Object.class;
+            } else if (InterceptionType.AROUND_CONSTRUCT.equals(interceptionType)) {
+                retType = interceptorMethod.returnType().kind().equals(Type.Kind.VOID) ? void.class : Object.class;
+            } else {
+                retType = void.class;
+            }
             ResultHandle ret;
             if (Modifier.isPrivate(interceptorMethod.flags())) {
                 privateMembers.add(isApplicationClass,

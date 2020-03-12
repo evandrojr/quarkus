@@ -1,27 +1,13 @@
-/*
- * Copyright 2019 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package io.quarkus.gradle.tasks;
+
+import java.util.Map;
+import java.util.Properties;
 
 import org.gradle.api.DefaultTask;
 
+import io.quarkus.bootstrap.model.AppArtifact;
 import io.quarkus.gradle.QuarkusPluginExtension;
 
-/**
- * @author <a href="mailto:stalep@gmail.com">Ståle Pedersen</a>
- */
 public abstract class QuarkusTask extends DefaultTask {
 
     private QuarkusPluginExtension extension;
@@ -34,8 +20,24 @@ public abstract class QuarkusTask extends DefaultTask {
     }
 
     QuarkusPluginExtension extension() {
-        if (extension == null)
-            extension = (QuarkusPluginExtension) getProject().getExtensions().findByName("quarkus");
+        if (extension == null) {
+            extension = getProject().getExtensions().findByType(QuarkusPluginExtension.class);
+        }
         return extension;
+    }
+
+    protected Properties getBuildSystemProperties(AppArtifact appArtifact) {
+        final Map<String, ?> properties = getProject().getProperties();
+        final Properties realProperties = new Properties();
+        for (Map.Entry<String, ?> entry : properties.entrySet()) {
+            final String key = entry.getKey();
+            final Object value = entry.getValue();
+            if (key != null && value instanceof String && key.startsWith("quarkus.")) {
+                realProperties.setProperty(key, (String) value);
+            }
+        }
+        realProperties.putIfAbsent("quarkus.application.name", appArtifact.getArtifactId());
+        realProperties.putIfAbsent("quarkus.application.version", appArtifact.getVersion());
+        return realProperties;
     }
 }

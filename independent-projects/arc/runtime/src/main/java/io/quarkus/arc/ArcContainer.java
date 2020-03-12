@@ -1,23 +1,9 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.arc;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Type;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
 import java.util.function.Supplier;
 import javax.enterprise.context.ContextNotActiveException;
 import javax.enterprise.inject.spi.BeanManager;
@@ -68,6 +54,16 @@ public interface ArcContainer {
     <T> InstanceHandle<T> instance(TypeLiteral<T> type, Annotation... qualifiers);
 
     /**
+     * Never returns null. However, the handle is empty if no bean matches/multiple beans match the specified type and
+     * qualifiers.
+     *
+     * @param type
+     * @param qualifiers
+     * @return a new instance handle
+     */
+    <X> InstanceHandle<X> instance(Type type, Annotation... qualifiers);
+
+    /**
      * Never returns null. However, the handle is empty if no bean matches/multiple beans match the specified name.
      * 
      * @param name
@@ -94,6 +90,14 @@ public interface ArcContainer {
     <T> InstanceHandle<T> instance(InjectableBean<T> bean);
 
     /**
+     * Returns true if Arc container is running.
+     * This can be used as a quick check to determine CDI availability in Quarkus.
+     *
+     * @return true is {@link ArcContainer} is running, false otherwise
+     */
+    boolean isRunning();
+
+    /**
      *
      * @param beanIdentifier
      * @return an injectable bean or null
@@ -115,4 +119,8 @@ public interface ArcContainer {
      */
     BeanManager beanManager();
 
+    /**
+     * @return the default executor service
+     */
+    ExecutorService getExecutorService();
 }

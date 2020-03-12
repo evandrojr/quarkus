@@ -1,35 +1,26 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.undertow.websockets.deployment;
 
 import java.lang.reflect.Modifier;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import javax.websocket.ClientEndpoint;
+import javax.websocket.ClientEndpointConfig;
+import javax.websocket.ContainerProvider;
 import javax.websocket.Endpoint;
 import javax.websocket.server.ServerApplicationConfig;
 import javax.websocket.server.ServerEndpoint;
+import javax.websocket.server.ServerEndpointConfig;
 
 import org.jboss.jandex.AnnotationInstance;
+import org.jboss.jandex.AnnotationValue;
 import org.jboss.jandex.ClassInfo;
 import org.jboss.jandex.DotName;
 import org.jboss.jandex.IndexView;
+import org.jboss.jandex.Type;
 
 import io.quarkus.arc.deployment.BeanDefiningAnnotationBuildItem;
 import io.quarkus.deployment.annotations.BuildProducer;
@@ -37,13 +28,17 @@ import io.quarkus.deployment.annotations.BuildStep;
 import io.quarkus.deployment.annotations.ExecutionTime;
 import io.quarkus.deployment.annotations.Record;
 import io.quarkus.deployment.builditem.CombinedIndexBuildItem;
+import io.quarkus.deployment.builditem.ExecutorBuildItem;
 import io.quarkus.deployment.builditem.FeatureBuildItem;
 import io.quarkus.deployment.builditem.ServiceStartBuildItem;
-import io.quarkus.deployment.builditem.substrate.ReflectiveClassBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.ServiceProviderBuildItem;
+import io.quarkus.runtime.annotations.ConfigRoot;
 import io.quarkus.undertow.deployment.ServletContextAttributeBuildItem;
-import io.quarkus.undertow.deployment.UndertowBuildItem;
-import io.quarkus.undertow.websockets.runtime.UndertowWebsocketTemplate;
+import io.quarkus.undertow.websockets.runtime.UndertowWebsocketRecorder;
+import io.undertow.websockets.jsr.DefaultContainerConfigurator;
 import io.undertow.websockets.jsr.JsrWebSocketFilter;
+import io.undertow.websockets.jsr.UndertowContainerProvider;
 import io.undertow.websockets.jsr.WebSocketDeploymentInfo;
 
 public class UndertowWebsocketProcessor {
@@ -54,16 +49,19 @@ public class UndertowWebsocketProcessor {
     private static final DotName ENDPOINT = DotName.createSimple(Endpoint.class.getName());
 
     @BuildStep
-    @Record(ExecutionTime.STATIC_INIT)
-    public ServletContextAttributeBuildItem deploy(final CombinedIndexBuildItem indexBuildItem,
-            UndertowWebsocketTemplate template,
-            BuildProducer<ReflectiveClassBuildItem> reflection, BuildProducer<FeatureBuildItem> feature) throws Exception {
-
+    void holdConfig(BuildProducer<FeatureBuildItem> feature, HotReloadConfig hotReloadConfig) {
         feature.produce(new FeatureBuildItem(FeatureBuildItem.UNDERTOW_WEBSOCKETS));
+    }
 
-        final Set<String> annotatedEndpoints = new HashSet<>();
-        final Set<String> endpoints = new HashSet<>();
-        final Set<String> config = new HashSet<>();
+    @BuildStep
+    ServiceProviderBuildItem registerConfiguratorServiceProvider() {
+        return new ServiceProviderBuildItem(ServerEndpointConfig.Configurator.class.getName(),
+                DefaultContainerConfigurator.class.getName());
+    }
+
+    @BuildStep
+    void scanForAnnotatedEndpoints(CombinedIndexBuildItem indexBuildItem,
+            BuildProducer<AnnotatedWebsocketEndpointBuildItem> annotatedProducer) {
 
         final IndexView index = indexBuildItem.getIndex();
 
@@ -72,7 +70,7 @@ public class UndertowWebsocketProcessor {
             if (endpoint.target() instanceof ClassInfo) {
                 ClassInfo clazz = (ClassInfo) endpoint.target();
                 if (!Modifier.isAbstract(clazz.flags())) {
-                    annotatedEndpoints.add(clazz.name().toString());
+                    annotatedProducer.produce(new AnnotatedWebsocketEndpointBuildItem(clazz.name().toString(), false));
                 }
             }
         }
@@ -82,11 +80,24 @@ public class UndertowWebsocketProcessor {
             if (endpoint.target() instanceof ClassInfo) {
                 ClassInfo clazz = (ClassInfo) endpoint.target();
                 if (!Modifier.isAbstract(clazz.flags())) {
-                    annotatedEndpoints.add(clazz.name().toString());
+                    annotatedProducer.produce(new AnnotatedWebsocketEndpointBuildItem(clazz.name().toString(), true));
                 }
             }
         }
 
+    }
+
+    @BuildStep
+    @Record(ExecutionTime.STATIC_INIT)
+    public ServletContextAttributeBuildItem deploy(final CombinedIndexBuildItem indexBuildItem,
+            UndertowWebsocketRecorder recorder,
+            BuildProducer<ReflectiveClassBuildItem> reflection,
+            List<AnnotatedWebsocketEndpointBuildItem> annotatedEndpoints) throws Exception {
+
+        final Set<String> endpoints = new HashSet<>();
+        final Set<String> config = new HashSet<>();
+
+        final IndexView index = indexBuildItem.getIndex();
         final Collection<ClassInfo> subclasses = index.getAllKnownImplementors(SERVER_APPLICATION_CONFIG);
 
         for (final ClassInfo clazz : subclasses) {
@@ -107,19 +118,56 @@ public class UndertowWebsocketProcessor {
                 config.isEmpty()) {
             return null;
         }
+        Set<String> annotated = new HashSet<>();
+        for (AnnotatedWebsocketEndpointBuildItem i : annotatedEndpoints) {
+            annotated.add(i.className);
+        }
         reflection.produce(
-                new ReflectiveClassBuildItem(true, false, annotatedEndpoints.toArray(new String[annotatedEndpoints.size()])));
+                new ReflectiveClassBuildItem(true, false, annotated.toArray(new String[annotated.size()])));
         reflection.produce(new ReflectiveClassBuildItem(false, false, JsrWebSocketFilter.class.getName()));
 
+        registerCodersForReflection(reflection, index.getAnnotations(SERVER_ENDPOINT));
+        registerCodersForReflection(reflection, index.getAnnotations(CLIENT_ENDPOINT));
+
+        reflection.produce(
+                new ReflectiveClassBuildItem(true, true, ClientEndpointConfig.Configurator.class.getName()));
+
         return new ServletContextAttributeBuildItem(WebSocketDeploymentInfo.ATTRIBUTE_NAME,
-                template.createDeploymentInfo(annotatedEndpoints, endpoints, config));
+                recorder.createDeploymentInfo(annotated, endpoints, config));
+    }
+
+    private void registerCodersForReflection(BuildProducer<ReflectiveClassBuildItem> reflection,
+            Collection<AnnotationInstance> endpoints) {
+        for (AnnotationInstance endpoint : endpoints) {
+            if (endpoint.target() instanceof ClassInfo) {
+                ClassInfo clazz = (ClassInfo) endpoint.target();
+                if (!Modifier.isAbstract(clazz.flags())) {
+                    registerForReflection(reflection, endpoint.value("encoders"));
+                    registerForReflection(reflection, endpoint.value("decoders"));
+                }
+            }
+        }
+    }
+
+    private void registerForReflection(BuildProducer<ReflectiveClassBuildItem> reflection, AnnotationValue types) {
+        if (types != null && types.asClassArray() != null) {
+            for (Type type : types.asClassArray()) {
+                reflection.produce(new ReflectiveClassBuildItem(true, false, type.name().toString()));
+            }
+        }
     }
 
     @BuildStep
     @Record(ExecutionTime.RUNTIME_INIT)
-    ServiceStartBuildItem setupWorker(UndertowWebsocketTemplate template, UndertowBuildItem undertow) {
-        template.setupWorker(undertow.getUndertow());
+    ServiceStartBuildItem setupWorker(UndertowWebsocketRecorder recorder, ExecutorBuildItem exec) {
+        recorder.setupWorker(exec.getExecutorProxy());
         return new ServiceStartBuildItem("Websockets");
+    }
+
+    @BuildStep
+    ServiceProviderBuildItem registerContainerProviderService() {
+        return new ServiceProviderBuildItem(ContainerProvider.class.getName(),
+                UndertowContainerProvider.class.getName());
     }
 
     @BuildStep
@@ -127,5 +175,19 @@ public class UndertowWebsocketProcessor {
         annotations.produce(new BeanDefiningAnnotationBuildItem(SERVER_ENDPOINT));
         annotations.produce(new BeanDefiningAnnotationBuildItem(ENDPOINT));
         annotations.produce(new BeanDefiningAnnotationBuildItem(CLIENT_ENDPOINT));
+    }
+
+    @ConfigRoot
+    static class HotReloadConfig {
+
+        /**
+         * The security key for remote hot deployment
+         */
+        Optional<String> password;
+
+        /**
+         * The remote URL to connect to
+         */
+        Optional<String> url;
     }
 }

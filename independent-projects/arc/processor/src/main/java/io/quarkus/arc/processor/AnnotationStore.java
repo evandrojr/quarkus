@@ -1,24 +1,7 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.arc.processor;
 
 import io.quarkus.arc.processor.AnnotationsTransformer.TransformationContext;
 import io.quarkus.arc.processor.BuildExtension.BuildContext;
-import io.quarkus.arc.processor.BuildExtension.Key;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -111,7 +94,7 @@ public class AnnotationStore {
         if (transformers.isEmpty()) {
             return annotations;
         }
-        TransformationContextImpl transformationContext = new TransformationContextImpl(target, annotations);
+        TransformationContextImpl transformationContext = new TransformationContextImpl(buildContext, target, annotations);
         for (AnnotationsTransformer transformer : transformers) {
             transformer.transform(transformationContext);
         }
@@ -146,44 +129,17 @@ public class AnnotationStore {
         return found;
     }
 
-    class TransformationContextImpl implements TransformationContext {
+    static class TransformationContextImpl extends AnnotationsTransformationContext<Collection<AnnotationInstance>>
+            implements TransformationContext {
 
-        private final AnnotationTarget target;
-
-        private Collection<AnnotationInstance> annotations;
-
-        TransformationContextImpl(AnnotationTarget target, Collection<AnnotationInstance> annotations) {
-            this.target = target;
-            this.annotations = annotations;
-        }
-
-        @Override
-        public <V> V get(Key<V> key) {
-            return buildContext.get(key);
-        }
-
-        @Override
-        public <V> V put(Key<V> key, V value) {
-            return buildContext.put(key, value);
-        }
-
-        @Override
-        public AnnotationTarget getTarget() {
-            return target;
-        }
-
-        @Override
-        public Collection<AnnotationInstance> getAnnotations() {
-            return annotations;
-        }
-
-        void setAnnotations(Collection<AnnotationInstance> annotations) {
-            this.annotations = annotations;
+        public TransformationContextImpl(BuildContext buildContext, AnnotationTarget target,
+                Collection<AnnotationInstance> annotations) {
+            super(buildContext, target, annotations);
         }
 
         @Override
         public Transformation transform() {
-            return new Transformation(this);
+            return new Transformation(new ArrayList<>(getAnnotations()), getTarget(), this::setAnnotations);
         }
 
     }

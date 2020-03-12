@@ -1,19 +1,3 @@
-/*
- * Copyright 2019 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.test.common;
 
 import static io.quarkus.test.common.PathTestHelper.getTestClassesLocation;
@@ -21,16 +5,25 @@ import static io.quarkus.test.common.PathTestHelper.getTestClassesLocation;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
 import java.nio.file.FileVisitResult;
 import java.nio.file.FileVisitor;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.Set;
 
+import org.eclipse.microprofile.config.spi.ConfigProviderResolver;
 import org.jboss.jandex.AnnotationInstance;
 import org.jboss.jandex.DotName;
 import org.jboss.jandex.IndexView;
@@ -38,39 +31,79 @@ import org.jboss.jandex.Indexer;
 
 public class TestResourceManager {
 
-    private final Set<QuarkusTestResourceLifecycleManager> testResources;
+    private final List<QuarkusTestResourceLifecycleManager> testResources;
+    private Map<String, String> oldSystemProps;
 
     public TestResourceManager(Class<?> testClass) {
         testResources = getTestResources(testClass);
     }
 
-    public void start() {
+    public Map<String, String> start() {
+        Map<String, String> ret = new HashMap<>();
         for (QuarkusTestResourceLifecycleManager testResource : testResources) {
             try {
-                testResource.start();
+                ret.putAll(testResource.start());
             } catch (Exception e) {
-                throw new RuntimeException("Unable to start Quarkus test resource " + testResource);
+                throw new RuntimeException("Unable to start Quarkus test resource " + testResource, e);
             }
+        }
+        oldSystemProps = new HashMap<>();
+        for (Map.Entry<String, String> i : ret.entrySet()) {
+            oldSystemProps.put(i.getKey(), System.getProperty(i.getKey()));
+            if (i.getValue() == null) {
+                System.clearProperty(i.getKey());
+            } else {
+                System.setProperty(i.getKey(), i.getValue());
+            }
+        }
+        return ret;
+    }
+
+    public void inject(Object testInstance) {
+        for (QuarkusTestResourceLifecycleManager testResource : testResources) {
+            testResource.inject(testInstance);
         }
     }
 
     public void stop() {
+        if (oldSystemProps != null) {
+            for (Map.Entry<String, String> e : oldSystemProps.entrySet()) {
+                if (e.getValue() == null) {
+                    System.clearProperty(e.getKey());
+                } else {
+                    System.setProperty(e.getKey(), e.getValue());
+                }
+
+            }
+        }
+        oldSystemProps = null;
         for (QuarkusTestResourceLifecycleManager testResource : testResources) {
             try {
                 testResource.stop();
             } catch (Exception e) {
-                throw new RuntimeException("Unable to start Quarkus test resource " + testResource);
+                throw new RuntimeException("Unable to stop Quarkus test resource " + testResource, e);
             }
+        }
+        try {
+            ConfigProviderResolver cpr = ConfigProviderResolver.instance();
+            cpr.releaseConfig(cpr.getConfig());
+        } catch (Throwable ignored) {
         }
     }
 
     @SuppressWarnings("unchecked")
-    private Set<QuarkusTestResourceLifecycleManager> getTestResources(Class<?> testClass) {
+    private List<QuarkusTestResourceLifecycleManager> getTestResources(Class<?> testClass) {
         IndexView index = indexTestClasses(testClass);
 
         Set<Class<? extends QuarkusTestResourceLifecycleManager>> testResourceRunnerClasses = new LinkedHashSet<>();
 
-        for (AnnotationInstance annotation : index.getAnnotations(DotName.createSimple(QuarkusTestResource.class.getName()))) {
+        Set<AnnotationInstance> testResourceAnnotations = new HashSet<>();
+        testResourceAnnotations.addAll(index.getAnnotations(DotName.createSimple(QuarkusTestResource.class.getName())));
+        for (AnnotationInstance annotation : index
+                .getAnnotations(DotName.createSimple(QuarkusTestResource.List.class.getName()))) {
+            Collections.addAll(testResourceAnnotations, annotation.value().asNestedArray());
+        }
+        for (AnnotationInstance annotation : testResourceAnnotations) {
             try {
                 testResourceRunnerClasses.add((Class<? extends QuarkusTestResourceLifecycleManager>) Class
                         .forName(annotation.value().asString()));
@@ -79,7 +112,7 @@ public class TestResourceManager {
             }
         }
 
-        Set<QuarkusTestResourceLifecycleManager> testResourceRunners = new LinkedHashSet<>();
+        List<QuarkusTestResourceLifecycleManager> testResourceRunners = new ArrayList<>();
 
         for (Class<? extends QuarkusTestResourceLifecycleManager> testResourceRunnerClass : testResourceRunnerClasses) {
             try {
@@ -90,52 +123,65 @@ public class TestResourceManager {
             }
         }
 
-        for (QuarkusTestResourceLifecycleManager i : ServiceLoader.load(QuarkusTestResourceLifecycleManager.class)) {
-            testResourceRunners.add(i);
+        for (QuarkusTestResourceLifecycleManager quarkusTestResourceLifecycleManager : ServiceLoader
+                .load(QuarkusTestResourceLifecycleManager.class)) {
+            testResourceRunners.add(quarkusTestResourceLifecycleManager);
         }
+
+        Collections.sort(testResourceRunners, new QuarkusTestResourceLifecycleManagerComparator());
 
         return testResourceRunners;
     }
 
     private IndexView indexTestClasses(Class<?> testClass) {
-        Indexer indexer = new Indexer();
-
+        final Indexer indexer = new Indexer();
+        final Path testClassesLocation = getTestClassesLocation(testClass);
         try {
-            Files.walkFileTree(getTestClassesLocation(testClass), new FileVisitor<Path>() {
-                @Override
-                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs)
-                        throws IOException {
-                    return FileVisitResult.CONTINUE;
-                }
-
-                @Override
-                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                    if (!file.toString().endsWith(".class")) {
-                        return FileVisitResult.CONTINUE;
+            if (Files.isDirectory(testClassesLocation)) {
+                indexTestClassesDir(indexer, testClassesLocation);
+            } else {
+                try (FileSystem jarFs = FileSystems.newFileSystem(testClassesLocation, null)) {
+                    for (Path p : jarFs.getRootDirectories()) {
+                        indexTestClassesDir(indexer, p);
                     }
-                    try (InputStream inputStream = Files.newInputStream(file, StandardOpenOption.READ)) {
-                        indexer.index(inputStream);
-                    } catch (Exception e) {
-                        // ignore
-                    }
-                    return FileVisitResult.CONTINUE;
                 }
-
-                @Override
-                public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException {
-                    return FileVisitResult.CONTINUE;
-                }
-
-                @Override
-                public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
-                    return FileVisitResult.CONTINUE;
-                }
-            });
+            }
         } catch (IOException e) {
             throw new RuntimeException("Unable to index the test-classes/ directory.", e);
         }
-
         return indexer.complete();
     }
 
+    private void indexTestClassesDir(Indexer indexer, final Path testClassesLocation) throws IOException {
+        Files.walkFileTree(testClassesLocation, new FileVisitor<Path>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs)
+                    throws IOException {
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                if (!file.toString().endsWith(".class")) {
+                    return FileVisitResult.CONTINUE;
+                }
+                try (InputStream inputStream = Files.newInputStream(file, StandardOpenOption.READ)) {
+                    indexer.index(inputStream);
+                } catch (Exception e) {
+                    // ignore
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException {
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
 }

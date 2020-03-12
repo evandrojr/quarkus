@@ -40,7 +40,7 @@ public class Sort {
         Descending;
     }
 
-    private class Column {
+    public class Column {
         private String name;
         private Direction direction;
 
@@ -50,6 +50,22 @@ public class Sort {
 
         public Column(String name, Direction direction) {
             this.name = name;
+            this.direction = direction;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public Direction getDirection() {
+            return direction;
+        }
+
+        public void setDirection(Direction direction) {
             this.direction = direction;
         }
     }
@@ -195,20 +211,11 @@ public class Sort {
     }
 
     /**
-     * Returns an SQL "order by" clause for the current sort columns and directions.
-     * 
-     * @return an SQL "order by" clause for the current sort columns and directions.
+     * Get the sort columns
+     *
+     * @return the sort columns
      */
-    public String toOrderBy() {
-        StringBuilder sb = new StringBuilder(" ORDER BY ");
-        for (int i = 0; i < columns.size(); i++) {
-            Column column = columns.get(i);
-            if (i > 0)
-                sb.append(" , ");
-            sb.append(column.name);
-            if (column.direction != Direction.Ascending)
-                sb.append(" DESC");
-        }
-        return sb.toString();
+    public List<Column> getColumns() {
+        return columns;
     }
 }

@@ -1,23 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  ~ Copyright 2018 Red Hat, Inc.
-  ~
-  ~ Licensed under the Apache License, Version 2.0 (the "License");
-  ~ you may not use this file except in compliance with the License.
-  ~ You may obtain a copy of the License at
-  ~
-  ~     http://www.apache.org/licenses/LICENSE-2.0
-  ~
-  ~ Unless required by applicable law or agreed to in writing, software
-  ~ distributed under the License is distributed on an "AS IS" BASIS,
-  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-  ~ See the License for the specific language governing permissions and
-  ~ limitations under the License.
-  -->
-
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <parent>
         <artifactId>quarkus-integration-tests-parent</artifactId>
         <groupId>io.quarkus</groupId>
@@ -28,11 +12,11 @@
 
     <artifactId>quarkus-integration-test-jpa-mssql</artifactId>
     <name>Quarkus - Integration Tests - JPA - MSSQL</name>
-    <description>Module that contains JPA related tests running in strict mode with the MSSQL database</description>
+    <description>Module that contains JPA related tests running with the MSSQL database</description>
 
     <properties>
-        <mssqldb.url>SomeJDBCUrl</mssqldb.url>
-        <mssqldb.sa-password>SomeJDBCPassword</mssqldb.sa-password>
+        <mssqldb.url>jdbc:sqlserver://localhost:1433;databaseName=tempdb</mssqldb.url>
+        <mssqldb.sa-password>ActuallyRequired11Complexity</mssqldb.sa-password>
     </properties>
 
     <dependencies>
@@ -40,19 +24,16 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-hibernate-orm</artifactId>
-            <scope>provided</scope>
         </dependency>
         <!-- We'll be using the MS SQL database -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-jdbc-mssql</artifactId>
-            <scope>provided</scope>
         </dependency>
         <!-- .. and some REST endpoints -->
         <dependency>
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-resteasy</artifactId>
-            <scope>provided</scope>
+            <artifactId>quarkus-undertow</artifactId>
         </dependency>
 
         <!-- test dependencies -->
@@ -89,7 +70,7 @@
                 </configuration>
             </plugin>
             <plugin>
-                <groupId>${project.groupId}</groupId>
+                <groupId>io.quarkus</groupId>
                 <artifactId>quarkus-maven-plugin</artifactId>
                 <executions>
                     <execution>
@@ -155,8 +136,9 @@
                         </executions>
                     </plugin>
                     <plugin>
-                        <groupId>${project.groupId}</groupId>
+                        <groupId>io.quarkus</groupId>
                         <artifactId>quarkus-maven-plugin</artifactId>
+                        <version>${project.version}</version>
                         <executions>
                             <execution>
                                 <id>native-image</id>
@@ -174,7 +156,6 @@
                                     <cleanupServer>true</cleanupServer>
                                     <enableHttpUrlHandler>true</enableHttpUrlHandler>
                                     <graalvmHome>${graalvmHome}</graalvmHome>
-                                    <enableJni>false</enableJni>
                                     <debugBuildProcess>false</debugBuildProcess>
                                 </configuration>
                             </execution>
@@ -207,6 +188,9 @@
                                     <name>microsoft/mssql-server-linux:2017-CU12</name>
                                     <alias>quarkus-test-mssqldb</alias>
                                     <run>
+                                        <network>
+                                            <mode>bridge</mode>
+                                        </network>
                                         <ports>
                                             <port>1433:1433</port>
                                         </ports>

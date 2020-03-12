@@ -41,15 +41,19 @@ public class IndexingUtil {
         for (DotName annotationName : beanInfo.annotations().keySet()) {
             if (!additionalIndex.contains(annotationName) && quarkusIndex.getClassByName(annotationName) == null) {
                 try (InputStream annotationStream = IoUtil.readClass(classLoader, annotationName.toString())) {
-                    log.debugf("Index annotation: %s", annotationName);
-                    indexer.index(annotationStream);
-                    additionalIndex.add(annotationName);
+                    if (annotationStream == null) {
+                        log.debugf("Could not index annotation: %s (missing class or dependency)", annotationName);
+                    } else {
+                        log.debugf("Index annotation: %s", annotationName);
+                        indexer.index(annotationStream);
+                        additionalIndex.add(annotationName);
+                    }
                 } catch (IOException e) {
                     throw new IllegalStateException("Failed to index: " + beanClass, e);
                 }
             }
         }
-        if (!beanInfo.superName().equals(OBJECT)) {
+        if (beanInfo.superName() != null && !beanInfo.superName().equals(OBJECT)) {
             indexClass(beanInfo.superName().toString(), indexer, quarkusIndex, additionalIndex, classLoader);
         }
     }

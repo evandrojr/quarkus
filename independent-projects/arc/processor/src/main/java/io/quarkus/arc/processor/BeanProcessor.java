@@ -1,24 +1,8 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.arc.processor;
 
+import io.quarkus.arc.processor.BeanDeploymentValidator.ValidationContext;
 import io.quarkus.arc.processor.BuildExtension.BuildContext;
 import io.quarkus.arc.processor.BuildExtension.Key;
-import io.quarkus.arc.processor.DeploymentEnhancer.DeploymentContext;
 import io.quarkus.arc.processor.ResourceOutput.Resource;
 import io.quarkus.arc.processor.ResourceOutput.Resource.SpecialType;
 import java.io.IOException;
@@ -31,18 +15,26 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import org.jboss.jandex.AnnotationInstance;
-import org.jboss.jandex.CompositeIndex;
 import org.jboss.jandex.DotName;
 import org.jboss.jandex.IndexView;
-import org.jboss.jandex.Indexer;
 import org.jboss.logging.Logger;
 
 /**
- *
- * @author Martin Kouba
+ * An integrator should create a new instance of the bean processor using the convenient {@link Builder} and then invoke the
+ * "processing" methods in the following order:
+ * 
+ * <ol>
+ * <li>{@link #registerCustomContexts()}</li>
+ * <li>{@link #registerBeans()}</li>
+ * <li>{@link #initialize(Consumer)}</li>
+ * <li>{@link #validate()}</li>
+ * <li>{@link #processValidationErrors(io.quarkus.arc.processor.BeanDeploymentValidator.ValidationContext)}</li>
+ * <li>{@link #generateResources(ReflectionRegistration)}</li>
+ * </ol>
  */
 public class BeanProcessor {
 
@@ -56,103 +48,100 @@ public class BeanProcessor {
 
     private final String name;
 
-    private final IndexView index;
-
-    private final Collection<BeanDefiningAnnotation> additionalBeanDefiningAnnotations;
-    private final Map<DotName, Collection<AnnotationInstance>> additionalStereotypes;
-
     private final ResourceOutput output;
 
     private final boolean sharedAnnotationLiterals;
 
     private final ReflectionRegistration reflectionRegistration;
 
-    private final Collection<DotName> resourceAnnotations;
-
-    private final List<AnnotationsTransformer> annotationTransformers;
     private final List<BeanRegistrar> beanRegistrars;
     private final List<ContextRegistrar> contextRegistrars;
+    private final List<ObserverRegistrar> observerRegistrars;
     private final List<BeanDeploymentValidator> beanDeploymentValidators;
 
     private final BuildContextImpl buildContext;
 
     private final Predicate<DotName> applicationClassPredicate;
 
-    private final boolean removeUnusedBeans;
-    private final List<Predicate<BeanInfo>> unusedExclusions;
+    private final BeanDeployment beanDeployment;
 
     private BeanProcessor(String name, IndexView index, Collection<BeanDefiningAnnotation> additionalBeanDefiningAnnotations,
             ResourceOutput output,
-            boolean sharedAnnotationLiterals, ReflectionRegistration reflectionRegistration,
+            boolean sharedAnnotationLiterals,
+            ReflectionRegistration reflectionRegistration,
             List<AnnotationsTransformer> annotationTransformers,
-            Collection<DotName> resourceAnnotations, List<BeanRegistrar> beanRegistrars,
-            List<ContextRegistrar> contextRegistrars, List<DeploymentEnhancer> deploymentEnhancers,
-            List<BeanDeploymentValidator> beanDeploymentValidators, Predicate<DotName> applicationClassPredicate,
+            List<InjectionPointsTransformer> injectionPointsTransformers,
+            List<ObserverTransformer> observerTransformers,
+            Collection<DotName> resourceAnnotations,
+            List<BeanRegistrar> beanRegistrars,
+            List<ObserverRegistrar> observerRegistrars,
+            List<ContextRegistrar> contextRegistrars,
+            List<BeanDeploymentValidator> beanDeploymentValidators,
+            Predicate<DotName> applicationClassPredicate,
             boolean unusedBeansRemovalEnabled,
-            List<Predicate<BeanInfo>> unusedExclusions, Map<DotName, Collection<AnnotationInstance>> additionalStereotypes) {
+            List<Predicate<BeanInfo>> unusedExclusions,
+            Map<DotName, Collection<AnnotationInstance>> additionalStereotypes,
+            List<InterceptorBindingRegistrar> interceptorBindingRegistrars,
+            boolean removeFinalForProxyableMethods,
+            boolean jtaCapabilities) {
         this.reflectionRegistration = reflectionRegistration;
         this.applicationClassPredicate = applicationClassPredicate;
         this.name = name;
-        this.additionalBeanDefiningAnnotations = additionalBeanDefiningAnnotations;
-        this.additionalStereotypes = additionalStereotypes;
-        this.output = Objects.requireNonNull(output);
+        this.output = output;
         this.sharedAnnotationLiterals = sharedAnnotationLiterals;
-        this.resourceAnnotations = resourceAnnotations;
-        this.removeUnusedBeans = unusedBeansRemovalEnabled;
-        this.unusedExclusions = unusedExclusions;
 
         // Initialize all build processors
         buildContext = new BuildContextImpl();
         buildContext.putInternal(Key.INDEX.asString(), index);
 
-        initAndSort(deploymentEnhancers, buildContext);
-        if (!deploymentEnhancers.isEmpty()) {
-            Indexer indexer = new Indexer();
-            DeploymentContext deploymentContext = new DeploymentContext() {
-
-                @Override
-                public void addClass(String className) {
-                    BeanArchives.index(indexer, className);
-                }
-
-                @Override
-                public void addClass(Class<?> clazz) {
-                    BeanArchives.index(indexer, clazz.getName());
-                }
-
-                @Override
-                public <V> V get(Key<V> key) {
-                    return buildContext.get(key);
-                }
-
-                @Override
-                public <V> V put(Key<V> key, V value) {
-                    return buildContext.put(key, value);
-                }
-            };
-            deploymentEnhancers.sort(BuildExtension::compare);
-            for (DeploymentEnhancer enhancer : deploymentEnhancers) {
-                enhancer.enhance(deploymentContext);
-            }
-            this.index = CompositeIndex.create(index, indexer.complete());
-        } else {
-            this.index = index;
-        }
-
-        this.annotationTransformers = initAndSort(annotationTransformers, buildContext);
         this.beanRegistrars = initAndSort(beanRegistrars, buildContext);
+        this.observerRegistrars = initAndSort(observerRegistrars, buildContext);
         this.contextRegistrars = initAndSort(contextRegistrars, buildContext);
         this.beanDeploymentValidators = initAndSort(beanDeploymentValidators, buildContext);
+        this.beanDeployment = new BeanDeployment(index, additionalBeanDefiningAnnotations,
+                initAndSort(annotationTransformers, buildContext),
+                initAndSort(injectionPointsTransformers, buildContext),
+                initAndSort(observerTransformers, buildContext),
+                resourceAnnotations, buildContext,
+                unusedBeansRemovalEnabled, unusedExclusions,
+                additionalStereotypes, interceptorBindingRegistrars, removeFinalForProxyableMethods,
+                jtaCapabilities);
     }
 
-    public BeanDeployment process() throws IOException {
+    public ContextRegistrar.RegistrationContext registerCustomContexts() {
+        return beanDeployment.registerCustomContexts(contextRegistrars);
+    }
 
-        BeanDeployment beanDeployment = new BeanDeployment(index, additionalBeanDefiningAnnotations, annotationTransformers,
-                resourceAnnotations, beanRegistrars, contextRegistrars, buildContext, removeUnusedBeans, unusedExclusions,
-                additionalStereotypes);
-        beanDeployment.init();
-        beanDeployment.validate(buildContext, beanDeploymentValidators);
+    /**
+     * Analyze the deployment and register all beans and observers declared on the classes. Furthermore, register all synthetic
+     * beans provided by bean registrars.
+     * 
+     * @return the context applied to {@link BeanRegistrar}
+     */
+    public BeanRegistrar.RegistrationContext registerBeans() {
+        return beanDeployment.registerBeans(beanRegistrars);
+    }
 
+    public ObserverRegistrar.RegistrationContext registerSyntheticObservers() {
+        return beanDeployment.registerSyntheticObservers(observerRegistrars);
+    }
+
+    public void initialize(Consumer<BytecodeTransformer> bytecodeTransformerConsumer) {
+        beanDeployment.init(bytecodeTransformerConsumer);
+    }
+
+    public BeanDeploymentValidator.ValidationContext validate() {
+        return beanDeployment.validate(beanDeploymentValidators);
+    }
+
+    public void processValidationErrors(BeanDeploymentValidator.ValidationContext validationContext) {
+        BeanDeployment.processErrors(validationContext.getDeploymentProblems());
+    }
+
+    public List<Resource> generateResources(ReflectionRegistration reflectionRegistration) throws IOException {
+        if (reflectionRegistration == null) {
+            reflectionRegistration = this.reflectionRegistration;
+        }
         PrivateMembersCollector privateMembers = new PrivateMembersCollector();
         AnnotationLiteralProcessor annotationLiterals = new AnnotationLiteralProcessor(sharedAnnotationLiterals,
                 applicationClassPredicate);
@@ -168,7 +157,6 @@ public class BeanProcessor {
         Map<BeanInfo, String> beanToGeneratedName = new HashMap<>();
         Map<ObserverInfo, String> observerToGeneratedName = new HashMap<>();
 
-        long start = System.currentTimeMillis();
         List<Resource> resources = new ArrayList<>();
 
         // Generate interceptors
@@ -214,17 +202,39 @@ public class BeanProcessor {
 
         // Generate _ComponentsProvider
         resources.addAll(
-                new ComponentsProviderGenerator().generate(name, beanDeployment, beanToGeneratedName, observerToGeneratedName));
+                new ComponentsProviderGenerator(annotationLiterals).generate(name, beanDeployment, beanToGeneratedName,
+                        observerToGeneratedName));
 
         // Generate AnnotationLiterals
         if (annotationLiterals.hasLiteralsToGenerate()) {
             resources.addAll(annotationLiteralsGenerator.generate(name, beanDeployment, annotationLiterals.getCache()));
         }
 
-        for (Resource resource : resources) {
-            output.writeResource(resource);
+        if (output != null) {
+            for (Resource resource : resources) {
+                output.writeResource(resource);
+            }
         }
-        LOGGER.debugf("Generated %s resources in %s ms", resources.size(), System.currentTimeMillis() - start);
+        return resources;
+    }
+
+    public BeanDeployment getBeanDeployment() {
+        return beanDeployment;
+    }
+
+    public BeanDeployment process() throws IOException {
+        registerCustomContexts();
+        registerBeans();
+        registerSyntheticObservers();
+        initialize(new Consumer<BytecodeTransformer>() {
+            @Override
+            public void accept(BytecodeTransformer transformer) {
+
+            }
+        });
+        ValidationContext validationContext = validate();
+        processValidationErrors(validationContext);
+        generateResources(null);
         return beanDeployment;
     }
 
@@ -246,12 +256,16 @@ public class BeanProcessor {
         private final List<DotName> resourceAnnotations = new ArrayList<>();
 
         private final List<AnnotationsTransformer> annotationTransformers = new ArrayList<>();
+        private final List<InjectionPointsTransformer> injectionPointTransformers = new ArrayList<>();
+        private final List<ObserverTransformer> observerTransformers = new ArrayList<>();
         private final List<BeanRegistrar> beanRegistrars = new ArrayList<>();
+        private final List<ObserverRegistrar> observerRegistrars = new ArrayList<>();
         private final List<ContextRegistrar> contextRegistrars = new ArrayList<>();
-        private final List<DeploymentEnhancer> deploymentEnhancers = new ArrayList<>();
+        private final List<InterceptorBindingRegistrar> additionalInterceptorBindingRegistrars = new ArrayList<>();
         private final List<BeanDeploymentValidator> beanDeploymentValidators = new ArrayList<>();
 
         private boolean removeUnusedBeans = false;
+        private boolean jtaCapabilities = false;
         private final List<Predicate<BeanInfo>> removalExclusions = new ArrayList<>();
 
         private Predicate<DotName> applicationClassPredicate = new Predicate<DotName>() {
@@ -260,6 +274,8 @@ public class BeanProcessor {
                 return true;
             }
         };
+
+        private boolean removeFinalForProxyableMethods;
 
         public Builder setName(String name) {
             this.name = name;
@@ -284,6 +300,11 @@ public class BeanProcessor {
             return this;
         }
 
+        public Builder addInterceptorbindingRegistrar(InterceptorBindingRegistrar bindingRegistrar) {
+            this.additionalInterceptorBindingRegistrars.add(bindingRegistrar);
+            return this;
+        }
+
         public Builder setOutput(ResourceOutput output) {
             this.output = output;
             return this;
@@ -304,6 +325,16 @@ public class BeanProcessor {
             return this;
         }
 
+        public Builder addInjectionPointTransformer(InjectionPointsTransformer transformer) {
+            this.injectionPointTransformers.add(transformer);
+            return this;
+        }
+
+        public Builder addObserverTransformer(ObserverTransformer transformer) {
+            this.observerTransformers.add(transformer);
+            return this;
+        }
+
         public Builder addResourceAnnotations(Collection<DotName> resourceAnnotations) {
             this.resourceAnnotations.addAll(resourceAnnotations);
             return this;
@@ -314,13 +345,13 @@ public class BeanProcessor {
             return this;
         }
 
-        public Builder addContextRegistrar(ContextRegistrar registrar) {
-            this.contextRegistrars.add(registrar);
+        public Builder addObserverRegistrar(ObserverRegistrar registrar) {
+            this.observerRegistrars.add(registrar);
             return this;
         }
 
-        public Builder addDeploymentEnhancer(DeploymentEnhancer enhancer) {
-            this.deploymentEnhancers.add(enhancer);
+        public Builder addContextRegistrar(ContextRegistrar registrar) {
+            this.contextRegistrars.add(registrar);
             return this;
         }
 
@@ -331,6 +362,11 @@ public class BeanProcessor {
 
         public Builder setApplicationClassPredicate(Predicate<DotName> applicationClassPredicate) {
             this.applicationClassPredicate = applicationClassPredicate;
+            return this;
+        }
+
+        public Builder setJtaCapabilities(boolean jtaCapabilities) {
+            this.jtaCapabilities = jtaCapabilities;
             return this;
         }
 
@@ -367,11 +403,17 @@ public class BeanProcessor {
             return this;
         }
 
+        public Builder setRemoveFinalFromProxyableMethods(boolean removeFinalForProxyableMethods) {
+            this.removeFinalForProxyableMethods = removeFinalForProxyableMethods;
+            return this;
+        }
+
         public BeanProcessor build() {
             return new BeanProcessor(name, index, additionalBeanDefiningAnnotations, output, sharedAnnotationLiterals,
-                    reflectionRegistration, annotationTransformers, resourceAnnotations, beanRegistrars, contextRegistrars,
-                    deploymentEnhancers, beanDeploymentValidators, applicationClassPredicate, removeUnusedBeans,
-                    removalExclusions, additionalStereotypes);
+                    reflectionRegistration, annotationTransformers, injectionPointTransformers, observerTransformers,
+                    resourceAnnotations, beanRegistrars, observerRegistrars, contextRegistrars, beanDeploymentValidators,
+                    applicationClassPredicate, removeUnusedBeans, removalExclusions, additionalStereotypes,
+                    additionalInterceptorBindingRegistrars, removeFinalForProxyableMethods, jtaCapabilities);
         }
 
     }

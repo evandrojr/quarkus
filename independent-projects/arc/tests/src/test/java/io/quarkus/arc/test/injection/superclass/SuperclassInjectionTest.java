@@ -1,24 +1,8 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.arc.test.injection.superclass;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotEquals;
-import static org.junit.Assert.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import io.quarkus.arc.Arc;
 import io.quarkus.arc.test.ArcTestContainer;
@@ -31,13 +15,14 @@ import javax.enterprise.context.ApplicationScoped;
 import javax.enterprise.context.Dependent;
 import javax.inject.Inject;
 import javax.inject.Singleton;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 public class SuperclassInjectionTest {
 
-    @Rule
-    public ArcTestContainer container = new ArcTestContainer(Head.class, CombineHarvester.class, SuperCombineHarvester.class);
+    @RegisterExtension
+    public ArcTestContainer container = new ArcTestContainer(Head.class, CombineHarvester.class,
+            SuperCombineHarvester.class);
 
     @Test
     public void testSuperclassSamePackage() {
@@ -61,7 +46,7 @@ public class SuperclassInjectionTest {
         ids.add(combineHarvester.getHead3().id);
         ids.add(combineHarvester.getHead4().id);
         ids.add(combineHarvester.head5.id);
-        assertEquals("Wrong number of ids: " + ids, 5, ids.size());
+        assertEquals(5, ids.size(), () -> "Wrong number of ids: " + ids);
     }
 
     @Dependent

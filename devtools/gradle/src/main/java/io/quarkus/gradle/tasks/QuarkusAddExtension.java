@@ -1,34 +1,52 @@
-/*
- * Copyright 2019 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package io.quarkus.gradle.tasks;
 
-import org.gradle.api.tasks.TaskAction;
+import static java.util.Arrays.stream;
+import static java.util.stream.Collectors.toSet;
 
-/**
- * @author <a href="mailto:stalep@gmail.com">Ståle Pedersen</a>
- */
-public class QuarkusAddExtension extends QuarkusTask {
+import java.util.List;
+import java.util.Set;
+
+import org.gradle.api.GradleException;
+import org.gradle.api.tasks.Input;
+import org.gradle.api.tasks.TaskAction;
+import org.gradle.api.tasks.options.Option;
+
+import io.quarkus.cli.commands.AddExtensions;
+import io.quarkus.cli.commands.file.GradleBuildFile;
+import io.quarkus.cli.commands.writer.FileProjectWriter;
+
+public class QuarkusAddExtension extends QuarkusPlatformTask {
 
     public QuarkusAddExtension() {
-        super("Adds one of the available quarkus extensions to the current project");
+        super("Adds Quarkus extensions specified by the user to the project.");
+    }
+
+    private List<String> extensionsToAdd;
+
+    @Option(option = "extensions", description = "Configures the extensions to be added.")
+    public void setExtensionsToAdd(List<String> extensionsToAdd) {
+        this.extensionsToAdd = extensionsToAdd;
+    }
+
+    @Input
+    public List<String> getExtensionsToAdd() {
+        return extensionsToAdd;
     }
 
     @TaskAction
     public void addExtension() {
-        getLogger().lifecycle("Adding extension is not implemented yet");
-    }
+        Set<String> extensionsSet = getExtensionsToAdd()
+                .stream()
+                .flatMap(ext -> stream(ext.split(",")))
+                .map(String::trim)
+                .collect(toSet());
 
+        try {
+            new AddExtensions(new GradleBuildFile(new FileProjectWriter(getProject().getProjectDir())), platformDescriptor())
+                    .extensions(extensionsSet)
+                    .execute();
+        } catch (Exception e) {
+            throw new GradleException("Failed to add extensions " + getExtensionsToAdd(), e);
+        }
+    }
 }

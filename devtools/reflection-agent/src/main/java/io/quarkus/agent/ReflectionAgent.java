@@ -6,6 +6,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.IllegalClassFormatException;
+import java.nio.charset.StandardCharsets;
 import java.security.ProtectionDomain;
 import java.util.Collections;
 import java.util.HashSet;
@@ -33,6 +34,7 @@ public class ReflectionAgent {
                 if (className.startsWith("io/quarkus/agent")
                         || className.startsWith("java/")
                         || className.startsWith("javax/")
+                        || className.startsWith("jakarta/")
                         || className.startsWith("jdk/")
                         || className.startsWith("sun/")
                         || className.startsWith("org/jboss/log")) {
@@ -41,13 +43,13 @@ public class ReflectionAgent {
                 try {
                     AtomicBoolean modified = new AtomicBoolean(false);
                     ClassReader reader = new ClassReader(className);
-                    ClassWriter writer = new ClassWriter(reader, Opcodes.ASM6);
-                    reader.accept(new ClassVisitor(Opcodes.ASM6, writer) {
+                    ClassWriter writer = new ClassWriter(reader, Opcodes.ASM7);
+                    reader.accept(new ClassVisitor(Opcodes.ASM7, writer) {
                         @Override
                         public MethodVisitor visitMethod(int access, String name, String descriptor, String signature,
                                 String[] exceptions) {
                             MethodVisitor existing = super.visitMethod(access, name, descriptor, signature, exceptions);
-                            return new MethodVisitor(Opcodes.ASM6, existing) {
+                            return new MethodVisitor(Opcodes.ASM7, existing) {
                                 @Override
                                 public void visitMethodInsn(int opcode, String owner, String name, String descriptor,
                                         boolean isInterface) {
@@ -107,7 +109,7 @@ public class ReflectionAgent {
             Set<String> known = new HashSet<>();
             try (InputStream in = Thread.currentThread().getContextClassLoader()
                     .getResourceAsStream("META-INF/reflective-classes.txt")) {
-                BufferedReader reader = new BufferedReader(new InputStreamReader(in));
+                BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
                 String line;
                 while ((line = reader.readLine()) != null) {
                     known.add(line);

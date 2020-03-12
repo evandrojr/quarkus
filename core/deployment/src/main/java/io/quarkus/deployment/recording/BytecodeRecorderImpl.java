@@ -1,25 +1,9 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.deployment.recording;
 
 import static io.quarkus.gizmo.MethodDescriptor.ofConstructor;
 import static io.quarkus.gizmo.MethodDescriptor.ofMethod;
 
-import java.beans.PropertyDescriptor;
+import java.io.Closeable;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -28,24 +12,29 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Optional;
 import java.util.Set;
+import java.util.SortedMap;
+import java.util.SortedSet;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import org.apache.commons.beanutils.PropertyUtils;
-import org.jboss.invocation.proxy.ProxyConfiguration;
-import org.jboss.invocation.proxy.ProxyFactory;
 import org.jboss.jandex.AnnotationValue;
 import org.jboss.jandex.ArrayType;
 import org.jboss.jandex.ClassInfo;
@@ -53,12 +42,15 @@ import org.jboss.jandex.MethodInfo;
 import org.jboss.jandex.Type;
 import org.wildfly.common.Assert;
 
-import io.quarkus.deployment.ClassOutput;
+import io.quarkus.deployment.proxy.ProxyConfiguration;
+import io.quarkus.deployment.proxy.ProxyFactory;
 import io.quarkus.deployment.recording.AnnotationProxyProvider.AnnotationProxy;
+import io.quarkus.deployment.recording.PropertyUtils.Property;
 import io.quarkus.gizmo.AssignableResultHandle;
 import io.quarkus.gizmo.BytecodeCreator;
 import io.quarkus.gizmo.CatchBlockCreator;
 import io.quarkus.gizmo.ClassCreator;
+import io.quarkus.gizmo.ClassOutput;
 import io.quarkus.gizmo.FieldDescriptor;
 import io.quarkus.gizmo.MethodCreator;
 import io.quarkus.gizmo.MethodDescriptor;
@@ -71,12 +63,12 @@ import io.quarkus.runtime.StartupTask;
 
 /**
  * A class that can be used to record invocations to bytecode so they can be replayed later. This is done through the
- * use of class templates and recording proxies.
+ * use of class recorders and recording proxies.
  * <p>
- * A class template is simple a stateless class with a no arg constructor. This template will contain the runtime logic
+ * A class recorder is simply a stateless class with a no arg constructor. This recorder will contain the runtime logic
  * used to bootstrap the various frameworks.
  * <p>
- * A recording proxy is a proxy of a template that records all invocations on the template, and then writes out a sequence
+ * A recording proxy is a proxy of a recorder that records all invocations on the recorder, and then writes out a sequence
  * of java bytecode that performs the same invocations.
  * <p>
  * There are some limitations on what can be recorded. Only the following objects are allowed as parameters to
@@ -91,6 +83,10 @@ import io.quarkus.runtime.StartupTask;
  */
 public class BytecodeRecorderImpl implements RecorderContext {
 
+    private static final Class<?> SINGLETON_LIST_CLASS = Collections.singletonList(1).getClass();
+    private static final Class<?> SINGLETON_SET_CLASS = Collections.singleton(1).getClass();
+    private static final Class<?> SINGLETON_MAP_CLASS = Collections.singletonMap(1, 1).getClass();
+
     private static final AtomicInteger COUNT = new AtomicInteger();
     private static final AtomicInteger OUTPUT_COUNT = new AtomicInteger();
     private static final String BASE_PACKAGE = "io.quarkus.deployment.steps.";
@@ -102,7 +98,9 @@ public class BytecodeRecorderImpl implements RecorderContext {
 
     private final boolean staticInit;
     private final ClassLoader classLoader;
-    private final MethodRecorder methodRecorder = new MethodRecorder();
+
+    private final Map<Class<?>, Object> existingProxyClasses = new HashMap<>();
+    private final List<BytecodeInstruction> storedMethodCalls = new ArrayList<>();
 
     private final Map<Class, ProxyFactory<?>> returnValueProxy = new HashMap<>();
     private final IdentityHashMap<Class<?>, String> classProxies = new IdentityHashMap<>();
@@ -111,7 +109,18 @@ public class BytecodeRecorderImpl implements RecorderContext {
     private final String className;
 
     private final List<ObjectLoader> loaders = new ArrayList<>();
-    private final IdentityHashMap<Object, ResultHandle> loadedObjects = new IdentityHashMap<>();
+
+    /**
+     * the maximum number of instruction groups that can be added to a method. This is to limit the size of the method
+     * so that the 65k limit is not reached.
+     *
+     * This is fairly arbitrary, as there is no fixed size for the instruction groups, but in practice this limit
+     * seems to be fairly reasonable
+     */
+    private static final int MAX_INSTRUCTION_GROUPS = 300;
+
+    private int deferredParameterCount = 0;
+    private boolean loadComplete;
 
     public BytecodeRecorderImpl(ClassLoader classLoader, boolean staticInit, String className) {
         this.classLoader = classLoader;
@@ -125,7 +134,7 @@ public class BytecodeRecorderImpl implements RecorderContext {
     }
 
     public boolean isEmpty() {
-        return methodRecorder.storedMethodCalls.isEmpty();
+        return storedMethodCalls.isEmpty();
     }
 
     @Override
@@ -146,16 +155,35 @@ public class BytecodeRecorderImpl implements RecorderContext {
         loaders.add(loader);
     }
 
-    public <T> T getRecordingProxy(Class<T> theClass) {
-        return methodRecorder.getRecordingProxy(theClass);
-    }
-
     @Override
     public Class<?> classProxy(String name) {
+        // if it's a primitive there is no need to create a proxy (and doing so would result in errors when the value is used)
+        switch (name) {
+            case "boolean":
+                return boolean.class;
+            case "byte":
+                return byte.class;
+            case "short":
+                return short.class;
+            case "int":
+                return int.class;
+            case "long":
+                return long.class;
+            case "float":
+                return float.class;
+            case "double":
+                return double.class;
+            case "char":
+                return char.class;
+            case "void":
+                return void.class;
+        }
+
         ProxyFactory<Object> factory = new ProxyFactory<>(new ProxyConfiguration<Object>()
                 .setSuperClass(Object.class)
                 .setClassLoader(classLoader)
-                .setProxyName(getClass().getName() + "$$ClassProxy" + COUNT.incrementAndGet()));
+                .setAnchorClass(getClass())
+                .setProxyNameSuffix("$$ClassProxy" + COUNT.incrementAndGet()));
         Class theClass = factory.defineClass();
         classProxies.put(theClass, name);
         return theClass;
@@ -164,103 +192,137 @@ public class BytecodeRecorderImpl implements RecorderContext {
     @Override
     public <T> RuntimeValue<T> newInstance(String name) {
         try {
-            ProxyInstance ret = methodRecorder.getProxyInstance(RuntimeValue.class);
+            ProxyInstance ret = getProxyInstance(RuntimeValue.class);
             NewInstance instance = new NewInstance(name, ret.proxy, ret.key);
-            methodRecorder.storedMethodCalls.add(instance);
+            storedMethodCalls.add(instance);
             return (RuntimeValue<T>) ret.proxy;
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
     }
 
-    private class MethodRecorder {
+    private static boolean isProxiable(Class<?> returnType) {
 
-        private final Map<Class<?>, Object> existingProxyClasses = new HashMap<>();
-        private final List<BytecodeInstruction> storedMethodCalls = new ArrayList<>();
-
-        public <T> T getRecordingProxy(Class<T> theClass) {
-            if (existingProxyClasses.containsKey(theClass)) {
-                return theClass.cast(existingProxyClasses.get(theClass));
-            }
-            ProxyFactory<T> factory = new ProxyFactory<T>(new ProxyConfiguration<T>()
-                    .setSuperClass(theClass)
-                    .setClassLoader(classLoader)
-                    .setProxyName(getClass().getName() + "$$RecordingProxyProxy" + COUNT.incrementAndGet()));
+        if (returnType.isPrimitive()) {
+            return false;
+        }
+        if (Modifier.isFinal(returnType.getModifiers())) {
+            return false;
+        }
+        boolean returnInterface = returnType.isInterface();
+        if (!returnInterface) {
             try {
-                T recordingProxy = factory.newInstance(new InvocationHandler() {
-                    @Override
-                    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-                        StoredMethodCall storedMethodCall = new StoredMethodCall(theClass, method, args);
-                        storedMethodCalls.add(storedMethodCall);
-                        Class<?> returnType = method.getReturnType();
-                        if (returnType.isPrimitive()) {
-                            return 0;
-                        }
-                        if (Modifier.isFinal(returnType.getModifiers())) {
-                            return null;
-                        }
-                        ProxyInstance instance = getProxyInstance(returnType);
-                        if (instance == null)
-                            return null;
-
-                        storedMethodCall.returnedProxy = instance.proxy;
-                        storedMethodCall.proxyId = instance.key;
-                        return instance.proxy;
-                    }
-
-                });
-                existingProxyClasses.put(theClass, recordingProxy);
-                return recordingProxy;
-            } catch (IllegalAccessException | InstantiationException e) {
-                throw new RuntimeException(e);
+                returnType.getConstructor();
+            } catch (NoSuchMethodException e) {
+                return false;
             }
         }
+        return true;
+    }
 
-        private ProxyInstance getProxyInstance(Class<?> returnType) throws InstantiationException, IllegalAccessException {
-            boolean returnInterface = returnType.isInterface();
-            if (!returnInterface) {
-                try {
-                    returnType.getConstructor();
-                } catch (NoSuchMethodException e) {
-                    return null;
-                }
-            }
-            ProxyFactory<?> proxyFactory = returnValueProxy.get(returnType);
-            if (proxyFactory == null) {
-                ProxyConfiguration<Object> proxyConfiguration = new ProxyConfiguration<Object>()
-                        .setSuperClass(returnInterface ? Object.class : (Class) returnType)
-                        .setClassLoader(classLoader)
-                        .addAdditionalInterface(ReturnedProxy.class)
-                        .setProxyName(getClass().getName() + "$$ReturnValueProxy" + COUNT.incrementAndGet());
+    public <T> T getRecordingProxy(Class<T> theClass) {
+        if (existingProxyClasses.containsKey(theClass)) {
+            return theClass.cast(existingProxyClasses.get(theClass));
+        }
+        String proxyNameSuffix = "$$RecordingProxyProxy" + COUNT.incrementAndGet();
 
-                if (returnInterface) {
-                    proxyConfiguration.addAdditionalInterface(returnType);
-                }
-                returnValueProxy.put(returnType, proxyFactory = new ProxyFactory<>(proxyConfiguration));
-            }
-
-            String key = PROXY_KEY + COUNT.incrementAndGet();
-            Object proxyInstance = proxyFactory.newInstance(new InvocationHandler() {
+        ProxyConfiguration<T> proxyConfiguration = new ProxyConfiguration<T>()
+                .setSuperClass(theClass)
+                .setClassLoader(classLoader)
+                .setAnchorClass(getClass())
+                .setProxyNameSuffix(proxyNameSuffix);
+        String proxyName = proxyConfiguration.getProxyName();
+        ProxyFactory<T> factory = new ProxyFactory<T>(proxyConfiguration);
+        try {
+            T recordingProxy = factory.newInstance(new InvocationHandler() {
                 @Override
                 public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-                    if (method.getName().equals("__returned$proxy$key")) {
-                        return key;
+                    if (staticInit) {
+                        for (int i = 0; i < args.length; ++i) {
+                            if (args[i] instanceof ReturnedProxy) {
+                                ReturnedProxy p = (ReturnedProxy) args[i];
+                                if (!p.__static$$init()) {
+                                    throw new RuntimeException("Invalid proxy passed to recorder. Parameter " + i + " of type "
+                                            + method.getParameterTypes()[i]
+                                            + " was created in a runtime recorder method, while this recorder is for a static init method. The object will not have been created at the time this method is run.");
+                                }
+                            }
+                        }
                     }
-                    if (method.getName().equals("__static$$init")) {
-                        return staticInit;
-                    }
+                    StoredMethodCall storedMethodCall = new StoredMethodCall(theClass, method, args);
+                    storedMethodCalls.add(storedMethodCall);
+                    Class<?> returnType = method.getReturnType();
                     if (method.getName().equals("toString")
                             && method.getParameterTypes().length == 0
-                            && method.getReturnType().equals(String.class)) {
-                        return "Runtime proxy of " + returnType + " with id " + key;
+                            && returnType.equals(String.class)) {
+                        return proxyName;
                     }
-                    throw new RuntimeException(
-                            "You cannot invoke directly on an object returned from the bytecode recorded, you can only pass is back into the recorder as a parameter");
+
+                    boolean voidMethod = method.getReturnType().equals(void.class);
+                    if (!voidMethod && !isProxiable(method.getReturnType())) {
+                        throw new RuntimeException("Cannot use " + method
+                                + " as a recorder method as the return type cannot be proxied. Use RuntimeValue to wrap the return value instead.");
+                    }
+                    if (voidMethod) {
+                        return null;
+                    }
+                    ProxyInstance instance = getProxyInstance(returnType);
+                    if (instance == null) {
+                        return null;
+                    }
+
+                    storedMethodCall.returnedProxy = instance.proxy;
+                    storedMethodCall.proxyId = instance.key;
+                    return instance.proxy;
                 }
+
             });
-            ProxyInstance instance = new ProxyInstance(proxyInstance, key);
-            return instance;
+            existingProxyClasses.put(theClass, recordingProxy);
+            return recordingProxy;
+        } catch (IllegalAccessException | InstantiationException e) {
+            throw new RuntimeException(e);
         }
+    }
+
+    private ProxyInstance getProxyInstance(Class<?> returnType) throws InstantiationException, IllegalAccessException {
+        boolean returnInterface = returnType.isInterface();
+        ProxyFactory<?> proxyFactory = returnValueProxy.get(returnType);
+        if (proxyFactory == null) {
+            ProxyConfiguration<Object> proxyConfiguration = new ProxyConfiguration<Object>()
+                    .setSuperClass(returnInterface ? Object.class : (Class) returnType)
+                    .setClassLoader(classLoader)
+                    .addAdditionalInterface(ReturnedProxy.class)
+                    .setAnchorClass(getClass())
+                    .setProxyNameSuffix("$$ReturnValueProxy" + COUNT.incrementAndGet());
+
+            if (returnInterface) {
+                proxyConfiguration.addAdditionalInterface(returnType);
+            }
+            returnValueProxy.put(returnType, proxyFactory = new ProxyFactory<>(proxyConfiguration));
+        }
+
+        String key = PROXY_KEY + COUNT.incrementAndGet();
+        Object proxyInstance = proxyFactory.newInstance(new InvocationHandler() {
+            @Override
+            public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                if (method.getName().equals("__returned$proxy$key")) {
+                    return key;
+                }
+                if (method.getName().equals("__static$$init")) {
+                    return staticInit;
+                }
+                if (method.getName().equals("toString")
+                        && method.getParameterTypes().length == 0
+                        && method.getReturnType().equals(String.class)) {
+                    return "Runtime proxy of " + returnType + " with id " + key;
+                }
+                throw new RuntimeException(
+                        "You cannot invoke " + method.getName()
+                                + "() directly on an object returned from the bytecode recorder, you can only pass it back into the recorder as a parameter");
+            }
+        });
+        ProxyInstance instance = new ProxyInstance(proxyInstance, key);
+        return instance;
     }
 
     public String getClassName() {
@@ -268,77 +330,184 @@ public class BytecodeRecorderImpl implements RecorderContext {
     }
 
     public void writeBytecode(ClassOutput classOutput) {
-        ClassCreator file = ClassCreator.builder().classOutput(ClassOutput.gizmoAdaptor(classOutput, true)).className(className)
+        ClassCreator file = ClassCreator.builder().classOutput(classOutput)
+                .className(className)
                 .superClass(Object.class).interfaces(StartupTask.class).build();
-        MethodCreator method = file.getMethodCreator("deploy", void.class, StartupContext.class);
+        MethodCreator mainMethod = file.getMethodCreator("deploy", void.class, StartupContext.class);
         //now create instances of all the classes we invoke on and store them in variables as well
-        Map<Class, ResultHandle> classInstanceVariables = new HashMap<>();
-        Map<Object, ResultHandle> returnValueResults = new IdentityHashMap<>();
-        for (BytecodeInstruction set : this.methodRecorder.storedMethodCalls) {
+        Map<Class, DeferredArrayStoreParameter> classInstanceVariables = new HashMap<>();
+
+        Map<Object, DeferredParameter> parameterMap = new IdentityHashMap<>();
+
+        //THIS IS FAIRLY COMPLEX
+        //the simple approach of just writing out the serialized invocations and method parameters as they are needed
+        //runs into trouble if you have a moderate number of items (in practice we seem to hit it around the 1k item
+        //mark, so apps with 1k entities or endpoints will fail)
+
+        //to get around this we break the code up into multiple methods, however this is not as simple as it sounds
+        //because it is not just the number of invocations that can be a problem but also the size of collections
+        //we need to account for both collections with a large number or items, and recorders with a large
+        //number of invocations.
+
+        //we solve this by breaking up all serialized state into a global array, that is passed between methods
+        //and non-primitive that is serialized will be stored into this array in a specific index, which allows
+        //for access from any method without needing to track ResultHandle's between methods and attempt to
+        //calculate which methods require which data
+
+        //note that this does not necessarily give the most efficient bytecode, however it does seem to be the simplest
+        //implementation wise.
+
+        //the first step is to create list of all these values that need to be placed into the array. We do that
+        //here, as well as creating the recorder instances (and also preparing them to be stored in the array)
+        for (BytecodeInstruction set : storedMethodCalls) {
             if (set instanceof StoredMethodCall) {
                 StoredMethodCall call = (StoredMethodCall) set;
-                if (classInstanceVariables.containsKey(call.theClass)) {
-                    continue;
+                if (!classInstanceVariables.containsKey(call.theClass)) {
+                    //this is a new recorder, create a deferred value that will allocate an array position for
+                    //the recorder
+                    DeferredArrayStoreParameter value = new DeferredArrayStoreParameter() {
+                        @Override
+                        ResultHandle createValue(MethodContext context, MethodCreator method, ResultHandle array) {
+                            return method.newInstance(ofConstructor(call.theClass));
+                        }
+                    };
+                    classInstanceVariables.put(call.theClass, value);
                 }
-                ResultHandle instance = method.newInstance(MethodDescriptor.ofConstructor(call.theClass));
-                classInstanceVariables.put(call.theClass, instance);
+                //for every parameter that was passed into the method we create a deferred value
+                //this will allocate a space in the array, so the value can be deserialized correctly
+                //even if the code for an invocation is split over several methods
+                for (int i = 0; i < call.parameters.length; ++i) {
+                    call.deferredParameters[i] = loadObjectInstance(call.parameters[i], parameterMap,
+                            call.method.getParameterTypes()[i]);
+                }
             }
         }
+
+        //when this is true it is no longer possible to allocate items in the array. this is a guard against programmer error
+
+        loadComplete = true;
+        //now we know know many items we have, create the array
+        ResultHandle array = mainMethod.newArray(Object.class, deferredParameterCount);
+
+        //this context manages the creation of new methods
+        //it tracks the number of instruction groups and when they hit a threshold it
+        //allocates a new method
+        SplitMethodContext context = new SplitMethodContext(array, mainMethod, file);
+
         //now we invoke the actual method call
-        for (BytecodeInstruction set : methodRecorder.storedMethodCalls) {
+        for (BytecodeInstruction set : storedMethodCalls) {
+
             if (set instanceof StoredMethodCall) {
+                //this instruction is a recorder invocation
                 StoredMethodCall call = (StoredMethodCall) set;
-                ResultHandle[] params = new ResultHandle[call.parameters.length];
-
                 for (int i = 0; i < call.parameters.length; ++i) {
-                    Class<?> targetType = call.method.getParameterTypes()[i];
-                    if (call.parameters[i] != null) {
-                        params[i] = loadObjectInstance(method, call.parameters[i], returnValueResults, targetType);
-                    } else {
-                        params[i] = method.loadNull();
-                    }
+                    //we need to doPrepare the loading before the write instruction call
+                    //this actually writes out the code to load the methods calls parameters
+                    //this code can end up in a different method to the actual call itself (or even multiple methods)
+                    //so this has to be outside the writeInstruction call, which will naturally group everything inside
+                    //it into a single method
+                    call.deferredParameters[i].prepare(context);
                 }
-                ResultHandle callResult = method.invokeVirtualMethod(ofMethod(call.method.getDeclaringClass(),
-                        call.method.getName(), call.method.getReturnType(), call.method.getParameterTypes()),
-                        classInstanceVariables.get(call.theClass), params);
+                final DeferredArrayStoreParameter recorderInstance = classInstanceVariables.get(call.theClass);
+                recorderInstance.prepare(context);
+                //write the method invocation. Everything in the instruction group is scoped to a single method
+                context.writeInstruction(new InstructionGroup() {
+                    @Override
+                    public void write(MethodContext context, MethodCreator method, ResultHandle array) {
+                        ResultHandle[] params = new ResultHandle[call.parameters.length];
 
-                if (call.method.getReturnType() != void.class) {
-                    if (call.returnedProxy != null) {
-                        returnValueResults.put(call.returnedProxy, callResult);
+                        //now we actually load the arguments
+                        //this will retrieve them from the array and create a ResultHandle
+                        //(or possible re-use an existing ResultHandler if there is already one for the current method)
+                        for (int i = 0; i < call.parameters.length; ++i) {
+                            params[i] = context.loadDeferred(call.deferredParameters[i]);
+                        }
+                        //do the invocation
+                        ResultHandle callResult = method.invokeVirtualMethod(ofMethod(call.method.getDeclaringClass(),
+                                call.method.getName(), call.method.getReturnType(), call.method.getParameterTypes()),
+                                context.loadDeferred(recorderInstance), params);
+
+                        if (call.method.getReturnType() != void.class) {
+                            if (call.returnedProxy != null) {
+                                //if the invocation had a return value put it in the startup context
+                                //to make it available to other recorders (and also this recorder)
+                                method.invokeVirtualMethod(
+                                        ofMethod(StartupContext.class, "putValue", void.class, String.class, Object.class),
+                                        method.getMethodParam(0), method.load(call.proxyId), callResult);
+                            }
+                        }
+                    }
+                });
+            } else if (set instanceof NewInstance) {
+                context.writeInstruction(new InstructionGroup() {
+                    @Override
+                    public void write(MethodContext context, MethodCreator method, ResultHandle array) {
+                        //this instruction creates a new instance
+                        //it just goes in the startup context
+                        NewInstance ni = (NewInstance) set;
+                        ResultHandle val = method.newInstance(ofConstructor(ni.theClass));
+                        ResultHandle rv = method.newInstance(ofConstructor(RuntimeValue.class, Object.class), val);
                         method.invokeVirtualMethod(
                                 ofMethod(StartupContext.class, "putValue", void.class, String.class, Object.class),
-                                method.getMethodParam(0), method.load(call.proxyId), callResult);
+                                method.getMethodParam(0), method.load(ni.proxyId), rv);
                     }
-                }
-            } else if (set instanceof NewInstance) {
-                NewInstance ni = (NewInstance) set;
-                ResultHandle val = method.newInstance(ofConstructor(ni.theClass));
-                ResultHandle rv = method.newInstance(ofConstructor(RuntimeValue.class, Object.class), val);
-                method.invokeVirtualMethod(ofMethod(StartupContext.class, "putValue", void.class, String.class, Object.class),
-                        method.getMethodParam(0), method.load(ni.proxyId), rv);
+                });
             } else {
                 throw new RuntimeException("unknown type " + set);
             }
-        }
 
-        method.returnValue(null);
+        }
+        context.close();
+        mainMethod.returnValue(null);
         file.close();
+
     }
 
-    private ResultHandle loadObjectInstance(MethodCreator method, Object param, Map<Object, ResultHandle> returnValueResults,
-            Class<?> expectedType) {
-
-        ResultHandle existing = returnValueResults.get(param);
-        if (existing != null) {
-            return existing;
+    /**
+     * Returns a representation of a serialized parameter.
+     */
+    private DeferredParameter loadObjectInstance(Object param, Map<Object, DeferredParameter> existing, Class<?> expectedType) {
+        if (loadComplete) {
+            throw new RuntimeException("All parameters have already been loaded, it is too late to call loadObjectInstance");
         }
-        ResultHandle out;
-        if (param == null) {
-            out = method.loadNull();
+        if (existing.containsKey(param)) {
+            return existing.get(param);
+        }
+        DeferredParameter ret = loadObjectInstanceImpl(param, existing, expectedType);
+        existing.put(param, ret);
+        return ret;
+    }
 
-        } else if (findLoaded(method, param)) {
-            return loadedObjects.get(param);
-        } else if (substitutions.containsKey(param.getClass()) || substitutions.containsKey(expectedType)) {
+    /**
+     * Returns a representation of a serialized parameter.
+     */
+    private DeferredParameter loadObjectInstanceImpl(Object param, Map<Object, DeferredParameter> existing,
+            Class<?> expectedType) {
+        //null is easy
+        if (param == null) {
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext creator, MethodCreator method, ResultHandle array) {
+                    return method.loadNull();
+                }
+            };
+        }
+        //check the loaded object support (i.e. config) to see if this is a config item
+        DeferredParameter loadedObject = findLoaded(param);
+        if (loadedObject != null) {
+            return loadedObject;
+        }
+
+        //Handle empty collections as returned by the Collections object
+        loadedObject = handleCollectionsObjects(param, existing);
+        if (loadedObject != null) {
+            return loadedObject;
+        }
+
+        //create the appropriate DeferredParameter, a lot of these a fairly simple constant values,
+        //but some are quite complex when dealing with objects and collections
+        if (substitutions.containsKey(param.getClass()) || substitutions.containsKey(expectedType)) {
+            //check for substitution types, if present we invoke recursively on the substitution
             SubstitutionHolder holder = substitutions.get(param.getClass());
             if (holder == null) {
                 holder = substitutions.get(expectedType);
@@ -346,10 +515,25 @@ public class BytecodeRecorderImpl implements RecorderContext {
             try {
                 ObjectSubstitution substitution = holder.sub.newInstance();
                 Object res = substitution.serialize(param);
-                ResultHandle serialized = loadObjectInstance(method, res, returnValueResults, holder.to);
-                ResultHandle subInstance = method.newInstance(MethodDescriptor.ofConstructor(holder.sub));
-                out = method.invokeInterfaceMethod(
-                        ofMethod(ObjectSubstitution.class, "deserialize", Object.class, Object.class), subInstance, serialized);
+                DeferredParameter serialized = loadObjectInstance(res, existing, holder.to);
+                SubstitutionHolder finalHolder = holder;
+                return new DeferredArrayStoreParameter() {
+
+                    @Override
+                    void doPrepare(MethodContext context) {
+                        serialized.prepare(context);
+                        super.doPrepare(context);
+                    }
+
+                    @Override
+                    ResultHandle createValue(MethodContext creator, MethodCreator method, ResultHandle array) {
+                        ResultHandle subInstance = method.newInstance(MethodDescriptor.ofConstructor(finalHolder.sub));
+                        return method.invokeInterfaceMethod(
+                                ofMethod(ObjectSubstitution.class, "deserialize", Object.class, Object.class), subInstance,
+                                creator.loadDeferred(serialized));
+                    }
+                };
+
             } catch (Exception e) {
                 throw new RuntimeException("Failed to substitute " + param, e);
             }
@@ -357,299 +541,788 @@ public class BytecodeRecorderImpl implements RecorderContext {
         } else if (param instanceof Optional) {
             Optional val = (Optional) param;
             if (val.isPresent()) {
-                ResultHandle res = loadObjectInstance(method, val.get(), returnValueResults, Object.class);
-                return method.invokeStaticMethod(ofMethod(Optional.class, "of", Optional.class, Object.class), res);
+                DeferredParameter res = loadObjectInstance(val.get(), existing, Object.class);
+                return new DeferredArrayStoreParameter() {
+                    @Override
+                    ResultHandle createValue(MethodContext context, MethodCreator method, ResultHandle array) {
+                        return method.invokeStaticMethod(ofMethod(Optional.class, "of", Optional.class, Object.class),
+                                context.loadDeferred(res));
+                    }
+                };
             } else {
-                return method.invokeStaticMethod(ofMethod(Optional.class, "empty", Optional.class));
+                return new DeferredArrayStoreParameter() {
+                    @Override
+                    ResultHandle createValue(MethodContext context, MethodCreator method, ResultHandle array) {
+                        return method.invokeStaticMethod(ofMethod(Optional.class, "empty", Optional.class));
+                    }
+                };
             }
         } else if (param instanceof String) {
-            out = method.load((String) param);
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.load((String) param);
+                }
+            };
         } else if (param instanceof Integer) {
-            out = method.invokeStaticMethod(ofMethod(Integer.class, "valueOf", Integer.class, int.class),
-                    method.load((Integer) param));
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Integer.class, "valueOf", Integer.class, int.class),
+                            method.load((Integer) param));
+                }
+            };
         } else if (param instanceof Boolean) {
-            out = method.invokeStaticMethod(ofMethod(Boolean.class, "valueOf", Boolean.class, boolean.class),
-                    method.load((Boolean) param));
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Boolean.class, "valueOf", Boolean.class, boolean.class),
+                            method.load((Boolean) param));
+                }
+            };
         } else if (param instanceof URL) {
             String url = ((URL) param).toExternalForm();
-            AssignableResultHandle value = method.createVariable(URL.class);
-            try (TryBlock et = method.tryBlock()) {
-                et.assign(value, et.newInstance(MethodDescriptor.ofConstructor(URL.class, String.class), et.load(url)));
-                out = value;
-                try (CatchBlockCreator malformed = et.addCatch(MalformedURLException.class)) {
-                    malformed.throwException(RuntimeException.class, "Malformed URL", malformed.getCaughtException());
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    AssignableResultHandle value = method.createVariable(URL.class);
+                    try (TryBlock et = method.tryBlock()) {
+                        et.assign(value, et.newInstance(MethodDescriptor.ofConstructor(URL.class, String.class), et.load(url)));
+                        try (CatchBlockCreator malformed = et.addCatch(MalformedURLException.class)) {
+                            malformed.throwException(RuntimeException.class, "Malformed URL", malformed.getCaughtException());
+                        }
+                    }
+                    return value;
                 }
-            }
-
+            };
         } else if (param instanceof Enum) {
             Enum e = (Enum) param;
-            ResultHandle nm = method.load(e.name());
-            out = method.invokeStaticMethod(ofMethod(e.getDeclaringClass(), "valueOf", e.getDeclaringClass(), String.class),
-                    nm);
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    ResultHandle nm = method.load(e.name());
+                    return method.invokeStaticMethod(
+                            ofMethod(e.getDeclaringClass(), "valueOf", e.getDeclaringClass(), String.class),
+                            nm);
+                }
+            };
         } else if (param instanceof ReturnedProxy) {
-
+            //if this is a proxy we just grab the value from the StartupContext
             ReturnedProxy rp = (ReturnedProxy) param;
             if (!rp.__static$$init() && staticInit) {
-                throw new RuntimeException("Invalid proxy passed to template. " + rp
+                throw new RuntimeException("Invalid proxy passed to recorder. " + rp
                         + " was created in a runtime recorder method, while this recorder is for a static init method. The object will not have been created at the time this method is run.");
             }
             String proxyId = rp.__returned$proxy$key();
-            out = method.invokeVirtualMethod(ofMethod(StartupContext.class, "getValue", Object.class, String.class),
-                    method.getMethodParam(0), method.load(proxyId));
+            //because this is the result of a method invocation that may not have happened at param deserialization time
+            //we just load it from the startup context
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeVirtualMethod(ofMethod(StartupContext.class, "getValue", Object.class, String.class),
+                            method.getMethodParam(0), method.load(proxyId));
+                }
+            };
+        } else if (param instanceof Duration) {
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Duration.class, "parse", Duration.class, CharSequence.class),
+                            method.load(param.toString()));
+                }
+            };
         } else if (param instanceof Class<?>) {
-            String name = classProxies.get(param);
-            if (name == null) {
-                name = ((Class) param).getName();
+            if (!((Class) param).isPrimitive()) {
+                // Only try to load the class by name if it is not a primitive class
+                String name = classProxies.get(param);
+                if (name == null) {
+                    name = ((Class) param).getName();
+                }
+                String finalName = name;
+                return new DeferredParameter() {
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+
+                        ResultHandle currentThread = method
+                                .invokeStaticMethod(ofMethod(Thread.class, "currentThread", Thread.class));
+                        ResultHandle tccl = method.invokeVirtualMethod(
+                                ofMethod(Thread.class, "getContextClassLoader", ClassLoader.class),
+                                currentThread);
+                        return method.invokeStaticMethod(
+                                ofMethod(Class.class, "forName", Class.class, String.class, boolean.class, ClassLoader.class),
+                                method.load(finalName), method.load(true), tccl);
+                    }
+                };
+            } else {
+                // Else load the primitive type by reference; double.class => Class var9 = Double.TYPE;
+                return new DeferredParameter() {
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        return method.loadClass((Class) param);
+                    }
+                };
             }
-            ResultHandle currentThread = method.invokeStaticMethod(ofMethod(Thread.class, "currentThread", Thread.class));
-            ResultHandle tccl = method.invokeVirtualMethod(ofMethod(Thread.class, "getContextClassLoader", ClassLoader.class),
-                    currentThread);
-            out = method.invokeStaticMethod(
-                    ofMethod(Class.class, "forName", Class.class, String.class, boolean.class, ClassLoader.class),
-                    method.load(name), method.load(true), tccl);
         } else if (expectedType == boolean.class) {
-            out = method.load((boolean) param);
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.load((boolean) param);
+                }
+            };
         } else if (expectedType == Boolean.class) {
-            out = method.invokeStaticMethod(ofMethod(Boolean.class, "valueOf", Boolean.class, boolean.class),
-                    method.load((boolean) param));
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Boolean.class, "valueOf", Boolean.class, boolean.class),
+                            method.load((boolean) param));
+                }
+            };
         } else if (expectedType == int.class) {
-            out = method.load((int) param);
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.load((int) param);
+                }
+            };
         } else if (expectedType == Integer.class) {
-            out = method.invokeStaticMethod(ofMethod(Integer.class, "valueOf", Integer.class, int.class),
-                    method.load((int) param));
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Integer.class, "valueOf", Integer.class, int.class),
+                            method.load((int) param));
+                }
+            };
         } else if (expectedType == short.class) {
-            out = method.load((short) param);
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.load((short) param);
+                }
+            };
         } else if (expectedType == Short.class || param instanceof Short) {
-            out = method.invokeStaticMethod(ofMethod(Short.class, "valueOf", Short.class, short.class),
-                    method.load((short) param));
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Short.class, "valueOf", Short.class, short.class),
+                            method.load((short) param));
+                }
+            };
         } else if (expectedType == byte.class) {
-            out = method.load((byte) param);
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.load((byte) param);
+                }
+            };
         } else if (expectedType == Byte.class || param instanceof Byte) {
-            out = method.invokeStaticMethod(ofMethod(Byte.class, "valueOf", Byte.class, byte.class), method.load((byte) param));
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Byte.class, "valueOf", Byte.class, byte.class),
+                            method.load((byte) param));
+                }
+            };
         } else if (expectedType == char.class) {
-            out = method.load((char) param);
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.load((char) param);
+                }
+            };
         } else if (expectedType == Character.class || param instanceof Character) {
-            out = method.invokeStaticMethod(ofMethod(Character.class, "valueOf", Character.class, char.class),
-                    method.load((char) param));
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Character.class, "valueOf", Character.class, char.class),
+                            method.load((char) param));
+                }
+            };
         } else if (expectedType == long.class) {
-            out = method.load((long) param);
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.load((long) param);
+                }
+            };
         } else if (expectedType == Long.class || param instanceof Long) {
-            out = method.invokeStaticMethod(ofMethod(Long.class, "valueOf", Long.class, long.class), method.load((long) param));
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Long.class, "valueOf", Long.class, long.class),
+                            method.load((long) param));
+                }
+            };
         } else if (expectedType == float.class) {
-            out = method.load((float) param);
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.load((float) param);
+                }
+            };
         } else if (expectedType == Float.class || param instanceof Float) {
-            out = method.invokeStaticMethod(ofMethod(Float.class, "valueOf", Float.class, float.class),
-                    method.load((float) param));
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Float.class, "valueOf", Float.class, float.class),
+                            method.load((float) param));
+                }
+            };
         } else if (expectedType == double.class) {
-            out = method.load((double) param);
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.load((double) param);
+                }
+            };
         } else if (expectedType == Double.class || param instanceof Double) {
-            out = method.invokeStaticMethod(ofMethod(Double.class, "valueOf", Double.class, double.class),
-                    method.load((double) param));
+            return new DeferredParameter() {
+                @Override
+                ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                    return method.invokeStaticMethod(ofMethod(Double.class, "valueOf", Double.class, double.class),
+                            method.load((double) param));
+                }
+            };
         } else if (expectedType.isArray()) {
             int length = Array.getLength(param);
-            out = method.newArray(expectedType.getComponentType(), method.load(length));
+            DeferredParameter[] components = new DeferredParameter[length];
+
             for (int i = 0; i < length; ++i) {
-                ResultHandle component = loadObjectInstance(method, Array.get(param, i), returnValueResults,
+                DeferredParameter component = loadObjectInstance(Array.get(param, i), existing,
                         expectedType.getComponentType());
-                method.writeArrayValue(out, i, component);
+                components[i] = component;
             }
-        } else if (AnnotationProxy.class.isAssignableFrom(expectedType)) {
+            return new DeferredArrayStoreParameter() {
+
+                @Override
+                void doPrepare(MethodContext context) {
+                    for (int i = 0; i < length; ++i) {
+                        components[i].prepare(context);
+                    }
+                    super.doPrepare(context);
+                }
+
+                @Override
+                ResultHandle createValue(MethodContext context, MethodCreator method, ResultHandle array) {
+                    //TODO large arrays can still generate a fair bit of bytecode, and there appears to be a gizmo issue that prevents casting to an array
+                    //fix this later
+                    ResultHandle out = method.newArray(expectedType.getComponentType(), length);
+                    for (int i = 0; i < length; ++i) {
+                        method.writeArrayValue(out, i, context.loadDeferred(components[i]));
+                    }
+                    return out;
+                }
+            };
+        } else if (param instanceof AnnotationProxy) {
             // new com.foo.MyAnnotation_Proxy_AnnotationLiteral("foo")
             AnnotationProxy annotationProxy = (AnnotationProxy) param;
             List<MethodInfo> constructorParams = annotationProxy.getAnnotationClass().methods().stream()
-                    .filter(m -> !m.name().equals("<clinit>") && !m.name().equals("<init>"))
-                    .collect(Collectors.toList());
+                    .filter(m -> !m.name().equals("<clinit>") && !m.name().equals("<init>")).collect(Collectors.toList());
             Map<String, AnnotationValue> annotationValues = annotationProxy.getAnnotationInstance().values().stream()
                     .collect(Collectors.toMap(AnnotationValue::name, Function.identity()));
-            ResultHandle[] constructorParamsHandles = new ResultHandle[constructorParams.size()];
+            DeferredParameter[] constructorParamsHandles = new DeferredParameter[constructorParams.size()];
 
             for (ListIterator<MethodInfo> iterator = constructorParams.listIterator(); iterator.hasNext();) {
                 MethodInfo valueMethod = iterator.next();
-                AnnotationValue value = annotationValues.get(valueMethod.name());
-                if (value == null) {
-                    // method.invokeInterfaceMethod(MAP_PUT, valuesHandle, method.load(entry.getKey()), loadObjectInstance(method, entry.getValue(), returnValueResults, entry.getValue().getClass()));
-                    Object defaultValue = annotationProxy.getDefaultValues().get(valueMethod.name());
-                    if (defaultValue != null) {
-                        constructorParamsHandles[iterator.previousIndex()] = loadObjectInstance(method, defaultValue,
-                                returnValueResults, defaultValue.getClass());
-                        continue;
-                    }
+                Object explicitValue = annotationProxy.getValues().get(valueMethod.name());
+                if (explicitValue != null) {
+                    constructorParamsHandles[iterator.previousIndex()] = loadObjectInstance(explicitValue, existing,
+                            explicitValue.getClass());
+                } else {
+                    AnnotationValue value = annotationValues.get(valueMethod.name());
                     if (value == null) {
-                        value = valueMethod.defaultValue();
-                    }
-                }
-                if (value == null) {
-                    throw new NullPointerException("Value not set for " + method);
-                }
-                ResultHandle retValue = loadValue(method, value, annotationProxy.getAnnotationClass(), valueMethod);
-                constructorParamsHandles[iterator.previousIndex()] = retValue;
-            }
-            out = method
-                    .newInstance(MethodDescriptor.ofConstructor(annotationProxy.getAnnotationLiteralType(),
-                            constructorParams.stream().map(m -> m.returnType().name().toString()).toArray()),
-                            constructorParamsHandles);
-
-        } else {
-            if (nonDefaultConstructors.containsKey(param.getClass())) {
-                NonDefaultConstructorHolder holder = nonDefaultConstructors.get(param.getClass());
-                List<Object> params = holder.paramGenerator.apply(param);
-                if (params.size() != holder.constructor.getParameterCount()) {
-                    throw new RuntimeException("Unable to serialize " + param
-                            + " as the wrong number of parameters were generated for " + holder.constructor);
-                }
-                List<ResultHandle> handles = new ArrayList<>();
-                int count = 0;
-                for (Object i : params) {
-                    handles.add(
-                            loadObjectInstance(method, i, returnValueResults, holder.constructor.getParameterTypes()[count++]));
-                }
-                out = method.newInstance(
-                        ofConstructor(holder.constructor.getDeclaringClass(), holder.constructor.getParameterTypes()),
-                        handles.toArray(new ResultHandle[handles.size()]));
-            } else {
-                try {
-                    param.getClass().getDeclaredConstructor();
-                    out = method.newInstance(ofConstructor(param.getClass()));
-                } catch (NoSuchMethodException e) {
-                    //fallback for collection types, such as unmodifiableMap
-                    if (expectedType == Map.class) {
-                        out = method.newInstance(ofConstructor(LinkedHashMap.class));
-                    } else if (expectedType == List.class) {
-                        out = method.newInstance(ofConstructor(ArrayList.class));
-                    } else if (expectedType == Set.class) {
-                        out = method.newInstance(ofConstructor(Set.class));
-                    } else {
-                        throw new RuntimeException("Unable to serialize objects of type " + param.getClass()
-                                + " to bytecode as it has no default constructor");
-                    }
-                }
-            }
-            returnValueResults.put(param, out);
-            if (param instanceof Collection) {
-                for (Object i : (Collection) param) {
-                    ResultHandle val = loadObjectInstance(method, i, returnValueResults, i.getClass());
-                    method.invokeInterfaceMethod(COLLECTION_ADD, out, val);
-                }
-            }
-            if (param instanceof Map) {
-                for (Map.Entry<?, ?> i : ((Map<?, ?>) param).entrySet()) {
-                    ResultHandle key = loadObjectInstance(method, i.getKey(), returnValueResults, i.getKey().getClass());
-                    ResultHandle val = i.getValue() != null
-                            ? loadObjectInstance(method, i.getValue(), returnValueResults, i.getValue().getClass())
-                            : null;
-                    method.invokeInterfaceMethod(MAP_PUT, out, key, val);
-                }
-            }
-            Set<String> handledProperties = new HashSet<>();
-            PropertyDescriptor[] desc = PropertyUtils.getPropertyDescriptors(param);
-            for (PropertyDescriptor i : desc) {
-                if (i.getReadMethod() != null && i.getWriteMethod() == null) {
-                    try {
-                        //read only prop, we may still be able to do stuff with it if it is a collection
-                        if (Collection.class.isAssignableFrom(i.getPropertyType())) {
-                            //special case, a collection with only a read method
-                            //we assume we can just add to the connection
-                            handledProperties.add(i.getName());
-
-                            Collection propertyValue = (Collection) PropertyUtils.getProperty(param, i.getName());
-                            if (!propertyValue.isEmpty()) {
-                                ResultHandle prop = method.invokeVirtualMethod(MethodDescriptor.ofMethod(i.getReadMethod()),
-                                        out);
-                                for (Object c : propertyValue) {
-                                    ResultHandle toAdd = loadObjectInstance(method, c, returnValueResults, Object.class);
-                                    method.invokeInterfaceMethod(COLLECTION_ADD, prop, toAdd);
-                                }
-                            }
-
-                        } else if (Map.class.isAssignableFrom(i.getPropertyType())) {
-                            //special case, a map with only a read method
-                            //we assume we can just add to the map
-
-                            handledProperties.add(i.getName());
-                            Map<Object, Object> propertyValue = (Map<Object, Object>) PropertyUtils.getProperty(param,
-                                    i.getName());
-                            if (!propertyValue.isEmpty()) {
-                                ResultHandle prop = method.invokeVirtualMethod(MethodDescriptor.ofMethod(i.getReadMethod()),
-                                        out);
-                                for (Map.Entry<Object, Object> entry : propertyValue.entrySet()) {
-                                    ResultHandle key = loadObjectInstance(method, entry.getKey(), returnValueResults,
-                                            Object.class);
-                                    ResultHandle val = entry.getValue() != null
-                                            ? loadObjectInstance(method, entry.getValue(), returnValueResults, Object.class)
-                                            : method.loadNull();
-                                    method.invokeInterfaceMethod(MAP_PUT, prop, key, val);
-                                }
-                            }
-                        }
-
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                } else if (i.getReadMethod() != null && i.getWriteMethod() != null) {
-                    try {
-                        handledProperties.add(i.getName());
-                        Object propertyValue = PropertyUtils.getProperty(param, i.getName());
-                        if (propertyValue == null) {
-                            //we just assume properties are null by default
-                            //TODO: is this a valid assumption? Should we check this by creating an instance?
+                        // method.invokeInterfaceMethod(MAP_PUT, valuesHandle, method.load(entry.getKey()), loadObjectInstance(method, entry.getValue(),
+                        // returnValueResults, entry.getValue().getClass()));
+                        Object defaultValue = annotationProxy.getDefaultValues().get(valueMethod.name());
+                        if (defaultValue != null) {
+                            constructorParamsHandles[iterator.previousIndex()] = loadObjectInstance(defaultValue, existing,
+                                    defaultValue.getClass());
                             continue;
                         }
-                        Class propertyType = i.getPropertyType();
-                        if (i.getReadMethod().getReturnType() != i.getWriteMethod().getParameterTypes()[0]) {
-                            //this is a weird situation where the reader and writer are different types
-                            //we iterate and try and find a valid setter method for the type we have
-                            //OpenAPI does some weird stuff like this
+                        if (value == null) {
+                            value = valueMethod.defaultValue();
+                        }
+                    }
+                    if (value == null) {
+                        throw new NullPointerException("Value not set for " + param);
+                    }
+                    DeferredParameter retValue = loadValue(value, annotationProxy.getAnnotationClass(), valueMethod);
+                    constructorParamsHandles[iterator.previousIndex()] = retValue;
+                }
+            }
+            return new DeferredArrayStoreParameter() {
+                @Override
+                ResultHandle createValue(MethodContext context, MethodCreator method, ResultHandle array) {
+                    MethodDescriptor constructor = MethodDescriptor.ofConstructor(annotationProxy.getAnnotationLiteralType(),
+                            constructorParams.stream().map(m -> m.returnType().name().toString()).toArray());
+                    ResultHandle[] args = new ResultHandle[constructorParamsHandles.length];
+                    for (int i = 0; i < constructorParamsHandles.length; i++) {
+                        DeferredParameter deferredParameter = constructorParamsHandles[i];
+                        if (deferredParameter instanceof DeferredArrayStoreParameter) {
+                            DeferredArrayStoreParameter arrayParam = (DeferredArrayStoreParameter) deferredParameter;
+                            arrayParam.doPrepare(context);
+                        }
+                        args[i] = context.loadDeferred(deferredParameter);
+                    }
+                    return method.newInstance(constructor, args);
+                }
+            };
 
-                            for (Method m : param.getClass().getMethods()) {
-                                if (m.getName().equals(i.getWriteMethod().getName())) {
-                                    if (m.getParameterTypes().length > 0
-                                            && m.getParameterTypes()[0].isAssignableFrom(param.getClass())) {
-                                        propertyType = m.getParameterTypes()[0];
-                                        break;
+        } else {
+            return loadComplexObject(param, existing, expectedType);
+        }
+    }
+
+    /**
+     * Loads objects returned from the {@link Collections} static utility methods. If this value is not of the type
+     * that this method can handle then null is returned.
+     *
+     * @param param The object to load
+     * @param existing
+     * @return
+     */
+    private DeferredParameter handleCollectionsObjects(Object param, Map<Object, DeferredParameter> existing) {
+        if (param instanceof Collection) {
+            if (param.getClass().equals(Collections.emptyList().getClass())) {
+                return new DeferredParameter() {
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        return method.invokeStaticMethod(MethodDescriptor.ofMethod(Collections.class, "emptyList", List.class));
+                    }
+                };
+            } else if (param.getClass().equals(Collections.emptySet().getClass())) {
+                return new DeferredParameter() {
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        return method.invokeStaticMethod(MethodDescriptor.ofMethod(Collections.class, "emptySet", Set.class));
+                    }
+                };
+            } else if (param.getClass().equals(Collections.emptySortedSet().getClass())) {
+                return new DeferredParameter() {
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        return method.invokeStaticMethod(
+                                MethodDescriptor.ofMethod(Collections.class, "emptySortedSet", SortedSet.class));
+                    }
+                };
+            } else if (param.getClass().equals(Collections.emptyNavigableSet().getClass())) {
+                return new DeferredParameter() {
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        return method.invokeStaticMethod(
+                                MethodDescriptor.ofMethod(Collections.class, "emptyNavigableSet", NavigableSet.class));
+                    }
+                };
+            } else if (param.getClass().equals(SINGLETON_LIST_CLASS)) {
+                DeferredParameter deferred = loadObjectInstance(((List) param).get(0), existing, Object.class);
+                return new DeferredParameter() {
+                    @Override
+                    void doPrepare(MethodContext context) {
+                        super.doPrepare(context);
+                        deferred.doPrepare(context);
+                    }
+
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        ResultHandle res = context.loadDeferred(deferred);
+                        return method.invokeStaticMethod(
+                                MethodDescriptor.ofMethod(Collections.class, "singletonList", List.class, Object.class), res);
+                    }
+                };
+            } else if (param.getClass().equals(SINGLETON_SET_CLASS)) {
+                DeferredParameter deferred = loadObjectInstance(((Set) param).iterator().next(), existing, Object.class);
+                return new DeferredParameter() {
+                    @Override
+                    void doPrepare(MethodContext context) {
+                        super.doPrepare(context);
+                        deferred.doPrepare(context);
+                    }
+
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        ResultHandle res = context.loadDeferred(deferred);
+                        return method.invokeStaticMethod(
+                                MethodDescriptor.ofMethod(Collections.class, "singleton", Set.class, Object.class), res);
+                    }
+                };
+            }
+        } else if (param instanceof Map) {
+            if (param.getClass().equals(Collections.emptyMap().getClass())) {
+                return new DeferredParameter() {
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        return method.invokeStaticMethod(MethodDescriptor.ofMethod(Collections.class, "emptyMap", Map.class));
+                    }
+                };
+            } else if (param.getClass().equals(Collections.emptySortedMap().getClass())) {
+                return new DeferredParameter() {
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        return method.invokeStaticMethod(
+                                MethodDescriptor.ofMethod(Collections.class, "emptySortedMap", SortedMap.class));
+                    }
+                };
+            } else if (param.getClass().equals(Collections.emptyNavigableMap().getClass())) {
+                return new DeferredParameter() {
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        return method.invokeStaticMethod(
+                                MethodDescriptor.ofMethod(Collections.class, "emptyNavigableMap", SortedMap.class));
+                    }
+                };
+            } else if (param.getClass().equals(SINGLETON_MAP_CLASS)) {
+                Map.Entry<?, ?> entry = ((Map<?, ?>) param).entrySet().iterator().next();
+
+                DeferredParameter key = loadObjectInstance(entry.getKey(), existing, Object.class);
+                DeferredParameter value = loadObjectInstance(entry.getValue(), existing, Object.class);
+                return new DeferredParameter() {
+                    @Override
+                    void doPrepare(MethodContext context) {
+                        super.doPrepare(context);
+                        key.doPrepare(context);
+                        value.doPrepare(context);
+                    }
+
+                    @Override
+                    ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+                        ResultHandle k = context.loadDeferred(key);
+                        ResultHandle v = context.loadDeferred(value);
+                        return method.invokeStaticMethod(
+                                MethodDescriptor.ofMethod(Collections.class, "singletonMap", Map.class, Object.class,
+                                        Object.class),
+                                k, v);
+                    }
+                };
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Created a {@link DeferredParameter} to load a complex object, such as a javabean or collection. This is basically
+     * just an extension of {@link #loadObjectInstanceImpl(Object, Map, Class)} but it removes some of the more complex
+     * code from that method.
+     *
+     * @param param The object to load
+     * @param existing The existing object map
+     * @param expectedType The expected type of the object
+     * @return
+     */
+    private DeferredParameter loadComplexObject(Object param, Map<Object, DeferredParameter> existing, Class<?> expectedType) {
+        //a list of steps that are performed on the object after it has been created
+        //we need to create all these first, to ensure the required objects have already
+        //been deserialized
+        List<SerialzationStep> setupSteps = new ArrayList<>();
+
+        if (param instanceof Collection) {
+            //if this is a collection we want to serialize every element
+            for (Object i : (Collection) param) {
+                DeferredParameter val = loadObjectInstance(i, existing, i.getClass());
+                setupSteps.add(new SerialzationStep() {
+                    @Override
+                    public void handle(MethodContext context, MethodCreator method, DeferredArrayStoreParameter out) {
+                        //each step can happen in a new method, so it is safe to do this
+                        method.invokeInterfaceMethod(COLLECTION_ADD, context.loadDeferred(out), context.loadDeferred(val));
+                    }
+
+                    @Override
+                    public void prepare(MethodContext context) {
+                        //handle the value serialization
+                        val.prepare(context);
+                    }
+                });
+            }
+        }
+        if (param instanceof Map) {
+            //map works the same as collection
+            for (Map.Entry<?, ?> i : ((Map<?, ?>) param).entrySet()) {
+                DeferredParameter key = loadObjectInstance(i.getKey(), existing, i.getKey().getClass());
+                DeferredParameter val = i.getValue() != null
+                        ? loadObjectInstance(i.getValue(), existing, i.getValue().getClass())
+                        : null;
+                setupSteps.add(new SerialzationStep() {
+                    @Override
+                    public void handle(MethodContext context, MethodCreator method, DeferredArrayStoreParameter out) {
+                        method.invokeInterfaceMethod(MAP_PUT, context.loadDeferred(out), context.loadDeferred(key),
+                                context.loadDeferred(val));
+                    }
+
+                    @Override
+                    public void prepare(MethodContext context) {
+                        key.prepare(context);
+                        val.prepare(context);
+                    }
+                });
+            }
+        }
+        Set<String> handledProperties = new HashSet<>();
+        Property[] desc = PropertyUtils.getPropertyDescriptors(param);
+        for (Property i : desc) {
+            if (i.getReadMethod() != null && i.getWriteMethod() == null) {
+                try {
+                    //read only prop, we may still be able to do stuff with it if it is a collection
+                    if (Collection.class.isAssignableFrom(i.getPropertyType())) {
+                        //special case, a collection with only a read method
+                        //we assume we can just add to the connection
+                        handledProperties.add(i.getName());
+
+                        Collection propertyValue = (Collection) i.read(param);
+                        if (propertyValue != null && !propertyValue.isEmpty()) {
+
+                            List<DeferredParameter> params = new ArrayList<>();
+                            for (Object c : propertyValue) {
+                                DeferredParameter toAdd = loadObjectInstance(c, existing, Object.class);
+                                params.add(toAdd);
+
+                            }
+                            setupSteps.add(new SerialzationStep() {
+                                @Override
+                                public void handle(MethodContext context, MethodCreator method,
+                                        DeferredArrayStoreParameter out) {
+                                    //get the collection
+                                    ResultHandle prop = method.invokeVirtualMethod(
+                                            MethodDescriptor.ofMethod(i.getReadMethod()),
+                                            context.loadDeferred(out));
+                                    for (DeferredParameter i : params) {
+                                        //add the parameter
+                                        //TODO: this is not guareded against large collections, probably not an issue in practice
+                                        method.invokeInterfaceMethod(COLLECTION_ADD, prop, context.loadDeferred(i));
                                     }
+                                }
+
+                                @Override
+                                public void prepare(MethodContext context) {
+                                    for (DeferredParameter i : params) {
+                                        i.prepare(context);
+                                    }
+                                }
+                            });
+                        }
+
+                    } else if (Map.class.isAssignableFrom(i.getPropertyType())) {
+                        //special case, a map with only a read method
+                        //we assume we can just add to the map
+                        //similar to how collection works above
+
+                        handledProperties.add(i.getName());
+                        Map<Object, Object> propertyValue = (Map<Object, Object>) i.read(param);
+                        if (propertyValue != null && !propertyValue.isEmpty()) {
+                            Map<DeferredParameter, DeferredParameter> def = new LinkedHashMap<>();
+                            for (Map.Entry<Object, Object> entry : propertyValue.entrySet()) {
+                                DeferredParameter key = loadObjectInstance(entry.getKey(), existing,
+                                        Object.class);
+                                DeferredParameter val = loadObjectInstance(entry.getValue(), existing, Object.class);
+                                def.put(key, val);
+                            }
+                            setupSteps.add(new SerialzationStep() {
+                                @Override
+                                public void handle(MethodContext context, MethodCreator method,
+                                        DeferredArrayStoreParameter out) {
+
+                                    ResultHandle prop = method.invokeVirtualMethod(
+                                            MethodDescriptor.ofMethod(i.getReadMethod()),
+                                            context.loadDeferred(out));
+                                    for (Map.Entry<DeferredParameter, DeferredParameter> e : def.entrySet()) {
+                                        method.invokeInterfaceMethod(MAP_PUT, prop, context.loadDeferred(e.getKey()),
+                                                context.loadDeferred(e.getValue()));
+                                    }
+                                }
+
+                                @Override
+                                public void prepare(MethodContext context) {
+                                    for (Map.Entry<DeferredParameter, DeferredParameter> e : def.entrySet()) {
+                                        e.getKey().prepare(context);
+                                        e.getValue().prepare(context);
+                                    }
+                                }
+                            });
+                        }
+                    }
+
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            } else if (i.getReadMethod() != null && i.getWriteMethod() != null) {
+                //normal javabean property
+                try {
+                    handledProperties.add(i.getName());
+                    Object propertyValue = i.read(param);
+                    if (propertyValue == null) {
+                        //we just assume properties are null by default
+                        //TODO: is this a valid assumption? Should we check this by creating an instance?
+                        continue;
+                    }
+                    Class propertyType = i.getPropertyType();
+                    if (i.getReadMethod().getReturnType() != i.getWriteMethod().getParameterTypes()[0]) {
+                        //this is a weird situation where the reader and writer are different types
+                        //we iterate and try and find a valid setter method for the type we have
+                        //OpenAPI does some weird stuff like this
+
+                        for (Method m : param.getClass().getMethods()) {
+                            if (m.getName().equals(i.getWriteMethod().getName())) {
+                                if (m.getParameterTypes().length > 0
+                                        && m.getParameterTypes()[0].isAssignableFrom(param.getClass())) {
+                                    propertyType = m.getParameterTypes()[0];
+                                    break;
                                 }
                             }
                         }
-                        ResultHandle val = loadObjectInstance(method, propertyValue, returnValueResults, i.getPropertyType());
-                        method.invokeVirtualMethod(
-                                ofMethod(param.getClass(), i.getWriteMethod().getName(), void.class, propertyType), out, val);
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
                     }
-                }
-            }
+                    DeferredParameter val = loadObjectInstance(propertyValue, existing,
+                            i.getPropertyType());
+                    Class finalPropertyType = propertyType;
+                    setupSteps.add(new SerialzationStep() {
+                        @Override
+                        public void handle(MethodContext context, MethodCreator method, DeferredArrayStoreParameter out) {
+                            method.invokeVirtualMethod(
+                                    ofMethod(param.getClass(), i.getWriteMethod().getName(), i.getWriteMethod().getReturnType(),
+                                            finalPropertyType),
+                                    context.loadDeferred(out),
+                                    context.loadDeferred(val));
+                        }
 
-            //now handle accessible fields
-            for (Field field : param.getClass().getFields()) {
-                if (!Modifier.isFinal(field.getModifiers()) && !Modifier.isStatic(field.getModifiers())
-                        && !handledProperties.contains(field.getName())) {
-
-                    try {
-                        ResultHandle val = loadObjectInstance(method, field.get(param), returnValueResults, field.getType());
-                        method.writeInstanceField(FieldDescriptor.of(param.getClass(), field.getName(), field.getType()), out,
-                                val);
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
+                        @Override
+                        public void prepare(MethodContext context) {
+                            val.prepare(context);
+                        }
+                    });
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
                 }
             }
         }
-        returnValueResults.put(param, out);
-        return out;
+
+        //now handle accessible fields
+        for (Field field : param.getClass().getFields()) {
+            if (!Modifier.isFinal(field.getModifiers()) && !Modifier.isStatic(field.getModifiers())
+                    && !handledProperties.contains(field.getName())) {
+
+                try {
+                    DeferredParameter val = loadObjectInstance(field.get(param), existing, field.getType());
+                    setupSteps.add(new SerialzationStep() {
+                        @Override
+                        public void handle(MethodContext context, MethodCreator method, DeferredArrayStoreParameter out) {
+                            method.writeInstanceField(
+                                    FieldDescriptor.of(param.getClass(), field.getName(), field.getType()),
+                                    context.loadDeferred(out),
+                                    context.loadDeferred(val));
+                        }
+
+                        @Override
+                        public void prepare(MethodContext context) {
+                            val.prepare(context);
+                        }
+                    });
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
+
+        //check how the object is constructed
+        NonDefaultConstructorHolder nonDefaultConstructorHolder = null;
+        List<DeferredParameter> nonDefaultConstructorHandles = new ArrayList<>();
+        if (nonDefaultConstructors.containsKey(param.getClass())) {
+            nonDefaultConstructorHolder = nonDefaultConstructors.get(param.getClass());
+            List<Object> params = nonDefaultConstructorHolder.paramGenerator.apply(param);
+            if (params.size() != nonDefaultConstructorHolder.constructor.getParameterCount()) {
+                throw new RuntimeException("Unable to serialize " + param
+                        + " as the wrong number of parameters were generated for "
+                        + nonDefaultConstructorHolder.constructor);
+            }
+            int count = 0;
+            for (Object i : params) {
+                nonDefaultConstructorHandles.add(
+                        loadObjectInstance(i, existing,
+                                nonDefaultConstructorHolder.constructor.getParameterTypes()[count++]));
+            }
+        }
+
+        NonDefaultConstructorHolder finalNonDefaultConstructorHolder = nonDefaultConstructorHolder;
+
+        //create a deferred value to represet the object itself. This allows the creation to be split
+        //over multiple methods, which is important if this is a large object
+        DeferredArrayStoreParameter objectValue = new DeferredArrayStoreParameter() {
+            @Override
+            ResultHandle createValue(MethodContext context, MethodCreator method, ResultHandle array) {
+                ResultHandle out;
+                //do the creation
+                if (finalNonDefaultConstructorHolder != null) {
+                    out = method.newInstance(
+                            ofConstructor(finalNonDefaultConstructorHolder.constructor.getDeclaringClass(),
+                                    finalNonDefaultConstructorHolder.constructor.getParameterTypes()),
+                            nonDefaultConstructorHandles.stream().map(m -> context.loadDeferred(m))
+                                    .toArray(ResultHandle[]::new));
+                } else {
+                    try {
+                        param.getClass().getDeclaredConstructor();
+                        out = method.newInstance(ofConstructor(param.getClass()));
+                    } catch (NoSuchMethodException e) {
+                        //fallback for collection types, such as unmodifiableMap
+                        if (SortedMap.class.isAssignableFrom(expectedType)) {
+                            out = method.newInstance(ofConstructor(TreeMap.class));
+                        } else if (Map.class.isAssignableFrom(expectedType)) {
+                            out = method.newInstance(ofConstructor(LinkedHashMap.class));
+                        } else if (List.class.isAssignableFrom(expectedType)) {
+                            out = method.newInstance(ofConstructor(ArrayList.class));
+                        } else if (SortedSet.class.isAssignableFrom(expectedType)) {
+                            out = method.newInstance(ofConstructor(TreeSet.class));
+                        } else if (Set.class.isAssignableFrom(expectedType)) {
+                            out = method.newInstance(ofConstructor(LinkedHashSet.class));
+                        } else {
+                            throw new RuntimeException("Unable to serialize objects of type " + param.getClass()
+                                    + " to bytecode as it has no default constructor");
+                        }
+                    }
+                }
+                return out;
+            }
+        };
+
+        //now return the actual deferred parameter that represents the result of construction
+        return new DeferredArrayStoreParameter() {
+
+            @Override
+            void doPrepare(MethodContext context) {
+                //this is where the object construction happens
+                //first create the actial object
+                objectValue.prepare(context);
+                for (SerialzationStep i : setupSteps) {
+                    //then prepare the steps (i.e. creating the values to be placed into this object)
+                    i.prepare(context);
+                }
+                for (SerialzationStep i : setupSteps) {
+                    //now actually run the steps (i.e. actually stick the values into the object)
+                    context.writeInstruction(new InstructionGroup() {
+                        @Override
+                        public void write(MethodContext context, MethodCreator method, ResultHandle array) {
+                            i.handle(context, method, objectValue);
+                        }
+                    });
+                }
+                super.doPrepare(context);
+            }
+
+            @Override
+            ResultHandle createValue(MethodContext context, MethodCreator method, ResultHandle array) {
+                //just return the already created object
+                return context.loadDeferred(objectValue);
+            }
+        };
     }
 
-    private boolean findLoaded(final BytecodeCreator body, final Object param) {
-        if (loadedObjects.containsKey(param)) {
-            return true;
-        }
+    private DeferredParameter findLoaded(final Object param) {
         for (ObjectLoader loader : loaders) {
-            ResultHandle handle = loader.load(body, param);
-            if (handle != null) {
-                loadedObjects.put(param, handle);
-                return true;
+            if (loader.canHandleObject(param, staticInit)) {
+                return new DeferredArrayStoreParameter() {
+                    @Override
+                    ResultHandle createValue(MethodContext creator, MethodCreator method, ResultHandle array) {
+                        return loader.load(method, param, staticInit);
+                    }
+                };
             }
         }
-        return false;
+        return null;
     }
 
     interface BytecodeInstruction {
@@ -666,6 +1339,7 @@ public class BytecodeRecorderImpl implements RecorderContext {
         final Class<?> theClass;
         final Method method;
         final Object[] parameters;
+        final DeferredParameter[] deferredParameters;
         Object returnedProxy;
         String proxyId;
 
@@ -673,6 +1347,7 @@ public class BytecodeRecorderImpl implements RecorderContext {
             this.theClass = theClass;
             this.method = method;
             this.parameters = parameters;
+            this.deferredParameters = new DeferredParameter[parameters.length];
         }
     }
 
@@ -721,53 +1396,62 @@ public class BytecodeRecorderImpl implements RecorderContext {
 
     }
 
-    static ResultHandle loadValue(BytecodeCreator valueMethod, AnnotationValue value, ClassInfo annotationClass,
+    DeferredParameter loadValue(AnnotationValue value, ClassInfo annotationClass,
             MethodInfo method) {
-        ResultHandle retValue;
-        switch (value.kind()) {
-            case BOOLEAN:
-                retValue = valueMethod.load(value.asBoolean());
-                break;
-            case STRING:
-                retValue = valueMethod.load(value.asString());
-                break;
-            case BYTE:
-                retValue = valueMethod.load(value.asByte());
-                break;
-            case SHORT:
-                retValue = valueMethod.load(value.asShort());
-                break;
-            case LONG:
-                retValue = valueMethod.load(value.asLong());
-                break;
-            case INTEGER:
-                retValue = valueMethod.load(value.asInt());
-                break;
-            case FLOAT:
-                retValue = valueMethod.load(value.asFloat());
-                break;
-            case DOUBLE:
-                retValue = valueMethod.load(value.asDouble());
-                break;
-            case CHARACTER:
-                retValue = valueMethod.load(value.asChar());
-                break;
-            case CLASS:
-                retValue = valueMethod.loadClass(value.asClass().toString());
-                break;
-            case ARRAY:
-                retValue = arrayValue(value, valueMethod, method, annotationClass);
-                break;
-            case ENUM:
-                retValue = valueMethod
-                        .readStaticField(FieldDescriptor.of(value.asEnumType().toString(), value.asEnum(),
-                                value.asEnumType().toString()));
-                break;
-            case NESTED:
-            default:
-                throw new UnsupportedOperationException("Unsupported value: " + value);
-        }
-        return retValue;
+        //note that this is a special case, in general DeferredParameter should be added to the main parameter list
+        //however in this case we know it is a constant
+        return new DeferredParameter() {
+
+            @Override
+            ResultHandle doLoad(MethodContext context, MethodCreator valueMethod, ResultHandle array) {
+
+                ResultHandle retValue;
+                switch (value.kind()) {
+                    case BOOLEAN:
+                        retValue = valueMethod.load(value.asBoolean());
+                        break;
+                    case STRING:
+                        retValue = valueMethod.load(value.asString());
+                        break;
+                    case BYTE:
+                        retValue = valueMethod.load(value.asByte());
+                        break;
+                    case SHORT:
+                        retValue = valueMethod.load(value.asShort());
+                        break;
+                    case LONG:
+                        retValue = valueMethod.load(value.asLong());
+                        break;
+                    case INTEGER:
+                        retValue = valueMethod.load(value.asInt());
+                        break;
+                    case FLOAT:
+                        retValue = valueMethod.load(value.asFloat());
+                        break;
+                    case DOUBLE:
+                        retValue = valueMethod.load(value.asDouble());
+                        break;
+                    case CHARACTER:
+                        retValue = valueMethod.load(value.asChar());
+                        break;
+                    case CLASS:
+                        retValue = valueMethod.loadClass(value.asClass().toString());
+                        break;
+                    case ARRAY:
+                        retValue = arrayValue(value, valueMethod, method, annotationClass);
+                        break;
+                    case ENUM:
+                        retValue = valueMethod
+                                .readStaticField(FieldDescriptor.of(value.asEnumType().toString(), value.asEnum(),
+                                        value.asEnumType().toString()));
+                        break;
+                    case NESTED:
+                    default:
+                        throw new UnsupportedOperationException("Unsupported value: " + value);
+                }
+                return retValue;
+            }
+        };
     }
 
     static ResultHandle arrayValue(AnnotationValue value, BytecodeCreator valueMethod, MethodInfo method,
@@ -837,6 +1521,199 @@ public class BytecodeRecorderImpl implements RecorderContext {
     static String componentType(MethodInfo method) {
         ArrayType arrayType = method.returnType().asArrayType();
         return arrayType.component().name().toString();
+    }
+
+    /**
+     * A bytecode serialized value. This is an abstraction over ResultHandle, as ResultHandle
+     * cannot span methods.
+     *
+     * Instances of DeferredParameter can be used in different methods
+     */
+    abstract class DeferredParameter {
+
+        boolean prepared = false;
+
+        /**
+         * The function that is called to read the value for use. This may be by reading the value from the Object[]
+         * array, or is may be a direct ldc instruction in the case of primitives.
+         *
+         * Code in this method is run in a single instruction group, so large objects should be serialized in the
+         * {@link #doPrepare(MethodContext)} method instead
+         * <p>
+         * This should not be called directly, but by {@link SplitMethodContext#loadDeferred(DeferredParameter)}
+         */
+        abstract ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array);
+
+        /**
+         * function that prepares the value for use. This is where objects should actually be loaded into the
+         * main array
+         *
+         * @param context The main method context.
+         */
+        final void prepare(MethodContext context) {
+            if (!prepared) {
+                prepared = true;
+                doPrepare(context);
+            }
+        }
+
+        void doPrepare(MethodContext context) {
+        }
+    }
+
+    abstract class DeferredArrayStoreParameter extends DeferredParameter {
+
+        final int arrayIndex;
+
+        /**
+         * method that contains the logic to actually create the stored value
+         */
+        abstract ResultHandle createValue(MethodContext context, MethodCreator method, ResultHandle array);
+
+        @Override
+        void doPrepare(MethodContext context) {
+            //write out some bytecode to load the object into the array
+            //this happens in a new instruction group
+            context.writeInstruction(new InstructionGroup() {
+                @Override
+                public void write(MethodContext context, MethodCreator method, ResultHandle array) {
+                    ResultHandle val = createValue(context, method, array);
+                    method.writeArrayValue(array, arrayIndex, val);
+                }
+            });
+            prepared = true;
+        }
+
+        @Override
+        final ResultHandle doLoad(MethodContext context, MethodCreator method, ResultHandle array) {
+            return method.readArrayValue(array, arrayIndex);
+        }
+
+        DeferredArrayStoreParameter() {
+            arrayIndex = deferredParameterCount++;
+        }
+
+    }
+
+    /**
+     * A step that must be executed to serialize a complex object
+     */
+    interface SerialzationStep {
+
+        void handle(MethodContext context, MethodCreator method, DeferredArrayStoreParameter out);
+
+        void prepare(MethodContext context);
+    }
+
+    /**
+     * class responsible for splitting the bytecode into smaller methods, to make sure that even large objects and large
+     * numbers of invocations do not put us over the method limit.
+     */
+    static class SplitMethodContext implements Closeable, MethodContext {
+        final ResultHandle deferredParameterArray;
+        final MethodCreator mainMethod;
+        final ClassCreator classCreator;
+        List<MethodCreator> allMethods = new ArrayList<>();
+
+        int methodCount;
+        int currentCount;
+        MethodCreator currentMethod;
+        Map<Integer, ResultHandle> currentMethodCache = new HashMap<>();
+
+        SplitMethodContext(ResultHandle deferredParameterArray, MethodCreator mainMethod, ClassCreator classCreator) {
+            this.deferredParameterArray = deferredParameterArray;
+            this.mainMethod = mainMethod;
+            this.classCreator = classCreator;
+        }
+
+        @Override
+        public void writeInstruction(InstructionGroup writer) {
+            if (currentMethod == null || currentCount++ >= MAX_INSTRUCTION_GROUPS) {
+                newMethod();
+            }
+            FixedMethodContext c = new FixedMethodContext(this);
+            c.writeInstruction(writer);
+        }
+
+        @Override
+        public ResultHandle loadDeferred(DeferredParameter parameter) {
+            if (currentMethod == null || currentCount++ >= MAX_INSTRUCTION_GROUPS) {
+                newMethod();
+            }
+            FixedMethodContext c = new FixedMethodContext(this);
+            return c.loadDeferred(parameter);
+        }
+
+        void newMethod() {
+            currentCount = 0;
+            currentMethod = classCreator.getMethodCreator(mainMethod.getMethodDescriptor().getName() + "_" + (methodCount++),
+                    mainMethod.getMethodDescriptor().getReturnType(), StartupContext.class, Object[].class);
+            mainMethod.invokeVirtualMethod(currentMethod.getMethodDescriptor(), mainMethod.getThis(),
+                    mainMethod.getMethodParam(0), deferredParameterArray);
+            currentMethodCache = new HashMap<>();
+            allMethods.add(currentMethod);
+        }
+
+        @Override
+        public void close() {
+            for (MethodCreator i : allMethods) {
+                i.returnValue(null);
+            }
+        }
+    }
+
+    static final class FixedMethodContext implements MethodContext {
+        final SplitMethodContext parent;
+        final MethodCreator currentMethod;
+        final Map<Integer, ResultHandle> currentMethodCache;
+
+        FixedMethodContext(SplitMethodContext parent) {
+            this.parent = parent;
+            this.currentMethod = parent.currentMethod;
+            this.currentMethodCache = parent.currentMethodCache;
+        }
+
+        @Override
+        public void writeInstruction(InstructionGroup writer) {
+            writer.write(this, currentMethod, currentMethod.getMethodParam(1));
+        }
+
+        @Override
+        public ResultHandle loadDeferred(DeferredParameter parameter) {
+            if (parameter instanceof DeferredArrayStoreParameter) {
+                //we don't want to have to go back to the array every time
+                //so we cache the result handles within the scope of the current method
+                int arrayIndex = ((DeferredArrayStoreParameter) parameter).arrayIndex;
+                if (currentMethodCache.containsKey(arrayIndex)) {
+                    return currentMethodCache.get(arrayIndex);
+                }
+                ResultHandle loaded = parameter.doLoad(this, currentMethod, currentMethod.getMethodParam(1));
+                if (parent.currentMethod == currentMethod) {
+                    currentMethodCache.put(arrayIndex, loaded);
+                    return loaded;
+                } else {
+                    ResultHandle ret = currentMethod.readArrayValue(currentMethod.getMethodParam(1), arrayIndex);
+                    currentMethodCache.put(arrayIndex, ret);
+                    return ret;
+                }
+            } else {
+                return parameter.doLoad(this, currentMethod, currentMethod.getMethodParam(1));
+            }
+        }
+    }
+
+    /**
+     * A group of instructions that will always be exectued in the same method
+     */
+    interface InstructionGroup {
+        void write(MethodContext context, MethodCreator creator, ResultHandle array);
+    }
+
+    public interface MethodContext {
+
+        void writeInstruction(InstructionGroup writer);
+
+        ResultHandle loadDeferred(DeferredParameter parameter);
     }
 
 }

@@ -1,6 +1,7 @@
 package io.quarkus.test.common;
 
 import java.lang.reflect.Field;
+import java.util.Optional;
 
 import org.eclipse.microprofile.config.ConfigProvider;
 
@@ -13,33 +14,58 @@ import org.eclipse.microprofile.config.ConfigProvider;
  */
 public class RestAssuredURLManager {
 
+    private static final int DEFAULT_HTTP_PORT = 8081;
+    private static final int DEFAULT_HTTPS_PORT = 8444;
+
     private static final Field portField;
     private static final Field baseURIField;
+    private static final Field basePathField;
     private static int oldPort;
     private static String oldBaseURI;
+    private static String oldBasePath;
 
     static {
         Field p;
-        Field base;
+        Field baseURI;
+        Field basePath;
         try {
             Class<?> restAssured = Class.forName("io.restassured.RestAssured");
             p = restAssured.getField("port");
             p.setAccessible(true);
-            base = restAssured.getField("baseURI");
-            base.setAccessible(true);
+            baseURI = restAssured.getField("baseURI");
+            baseURI.setAccessible(true);
+            basePath = restAssured.getField("basePath");
+            basePath.setAccessible(true);
         } catch (Exception e) {
             p = null;
-            base = null;
+            baseURI = null;
+            basePath = null;
         }
         portField = p;
-        baseURIField = base;
+        baseURIField = baseURI;
+        basePathField = basePath;
     }
 
-    public static void setURL() {
+    private RestAssuredURLManager() {
+
+    }
+
+    private static int getPortFromConfig(String key, int defaultValue) {
+        return ConfigProvider.getConfig().getOptionalValue(key, Integer.class).orElse(defaultValue);
+    }
+
+    public static void setURL(boolean useSecureConnection) {
+        setURL(useSecureConnection, null);
+    }
+
+    public static void setURL(boolean useSecureConnection, Integer port) {
         if (portField != null) {
             try {
                 oldPort = (Integer) portField.get(null);
-                int port = ConfigProvider.getConfig().getOptionalValue("quarkus.http.test-port", Integer.class).orElse(8081);
+                if (port == null) {
+                    port = useSecureConnection ? getPortFromConfig("quarkus.https.test-port", DEFAULT_HTTPS_PORT)
+                            : getPortFromConfig("quarkus.http.test-port", DEFAULT_HTTP_PORT);
+                }
                 portField.set(null, port);
             } catch (IllegalAccessException e) {
                 e.printStackTrace();
@@ -48,9 +74,26 @@ public class RestAssuredURLManager {
         if (baseURIField != null) {
             try {
                 oldBaseURI = (String) baseURIField.get(null);
-                String baseURI = "http://"
-                        + ConfigProvider.getConfig().getOptionalValue("quarkus.http.host", String.class).orElse("localhost");
+                final String protocol = useSecureConnection ? "https://" : "http://";
+                String host = ConfigProvider.getConfig().getOptionalValue("quarkus.http.host", String.class)
+                        .orElse("localhost");
+                if (host.equals("0.0.0.0")) {
+                    host = "localhost";
+                }
+                String baseURI = protocol + host;
                 baseURIField.set(null, baseURI);
+            } catch (IllegalAccessException e) {
+                e.printStackTrace();
+            }
+        }
+        if (basePathField != null) {
+            try {
+                oldBasePath = (String) basePathField.get(null);
+                Optional<String> basePath = ConfigProvider.getConfig().getOptionalValue("quarkus.http.root-path",
+                        String.class);
+                if (basePath.isPresent()) {
+                    basePathField.set(null, basePath.get());
+                }
             } catch (IllegalAccessException e) {
                 e.printStackTrace();
             }
@@ -68,6 +111,13 @@ public class RestAssuredURLManager {
         if (baseURIField != null) {
             try {
                 baseURIField.set(null, oldBaseURI);
+            } catch (IllegalAccessException e) {
+                e.printStackTrace();
+            }
+        }
+        if (basePathField != null) {
+            try {
+                basePathField.set(null, oldBasePath);
             } catch (IllegalAccessException e) {
                 e.printStackTrace();
             }

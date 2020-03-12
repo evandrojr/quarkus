@@ -1,58 +1,74 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.smallrye.openapi.deployment;
-
-import static io.quarkus.deployment.annotations.ExecutionTime.STATIC_INIT;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.eclipse.microprofile.config.Config;
 import org.eclipse.microprofile.config.ConfigProvider;
+import org.eclipse.microprofile.openapi.OASConfig;
+import org.eclipse.microprofile.openapi.OASFilter;
+import org.eclipse.microprofile.openapi.annotations.media.Schema;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponse;
+import org.eclipse.microprofile.openapi.annotations.responses.APIResponses;
 import org.eclipse.microprofile.openapi.models.OpenAPI;
+import org.jboss.jandex.AnnotationInstance;
+import org.jboss.jandex.AnnotationTarget;
+import org.jboss.jandex.AnnotationValue;
+import org.jboss.jandex.CompositeIndex;
+import org.jboss.jandex.DotName;
 import org.jboss.jandex.IndexView;
+import org.jboss.jandex.Indexer;
+import org.jboss.jandex.Type;
 
 import io.quarkus.arc.deployment.AdditionalBeanBuildItem;
-import io.quarkus.arc.deployment.BeanContainerListenerBuildItem;
+import io.quarkus.arc.deployment.BeanArchiveIndexBuildItem;
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
+import io.quarkus.deployment.annotations.ExecutionTime;
 import io.quarkus.deployment.annotations.Record;
 import io.quarkus.deployment.builditem.ApplicationArchivesBuildItem;
 import io.quarkus.deployment.builditem.CombinedIndexBuildItem;
+import io.quarkus.deployment.builditem.DeploymentClassLoaderBuildItem;
 import io.quarkus.deployment.builditem.FeatureBuildItem;
-import io.quarkus.deployment.builditem.HotDeploymentConfigFileBuildItem;
-import io.quarkus.resteasy.deployment.ResteasyJaxrsConfig;
-import io.quarkus.runtime.annotations.ConfigItem;
-import io.quarkus.runtime.annotations.ConfigRoot;
+import io.quarkus.deployment.builditem.GeneratedResourceBuildItem;
+import io.quarkus.deployment.builditem.HotDeploymentWatchedFileBuildItem;
+import io.quarkus.deployment.builditem.LaunchModeBuildItem;
+import io.quarkus.deployment.builditem.ShutdownContextBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.NativeImageResourceBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.ReflectiveHierarchyBuildItem;
+import io.quarkus.deployment.index.IndexingUtil;
+import io.quarkus.deployment.logging.LogCleanupFilterBuildItem;
+import io.quarkus.resteasy.common.deployment.ResteasyDotNames;
+import io.quarkus.resteasy.deployment.ResteasyJaxrsConfigBuildItem;
+import io.quarkus.runtime.LaunchMode;
+import io.quarkus.smallrye.openapi.common.deployment.SmallRyeOpenApiConfig;
 import io.quarkus.smallrye.openapi.runtime.OpenApiDocumentProducer;
-import io.quarkus.smallrye.openapi.runtime.OpenApiServlet;
-import io.quarkus.smallrye.openapi.runtime.SmallRyeOpenApiTemplate;
-import io.quarkus.undertow.deployment.ServletBuildItem;
+import io.quarkus.smallrye.openapi.runtime.OpenApiHandler;
+import io.quarkus.smallrye.openapi.runtime.OpenApiRecorder;
+import io.quarkus.vertx.http.deployment.RouteBuildItem;
+import io.quarkus.vertx.http.deployment.devmode.NotFoundPageDisplayableEndpointBuildItem;
+import io.quarkus.vertx.http.runtime.HandlerType;
 import io.smallrye.openapi.api.OpenApiConfig;
 import io.smallrye.openapi.api.OpenApiConfigImpl;
+import io.smallrye.openapi.api.OpenApiDocument;
+import io.smallrye.openapi.runtime.OpenApiProcessor;
 import io.smallrye.openapi.runtime.OpenApiStaticFile;
 import io.smallrye.openapi.runtime.io.OpenApiSerializer;
+import io.smallrye.openapi.runtime.scanner.FilteredIndexView;
 import io.smallrye.openapi.runtime.scanner.OpenApiAnnotationScanner;
 
 /**
@@ -67,46 +83,192 @@ public class SmallRyeOpenApiProcessor {
     private static final String META_INF_OPENAPI_JSON = "META-INF/openapi.json";
     private static final String WEB_INF_CLASSES_META_INF_OPENAPI_JSON = "WEB-INF/classes/META-INF/openapi.json";
 
+    private static final DotName OPENAPI_SCHEMA = DotName.createSimple(Schema.class.getName());
+    private static final DotName OPENAPI_RESPONSE = DotName.createSimple(APIResponse.class.getName());
+    private static final DotName OPENAPI_RESPONSES = DotName.createSimple(APIResponses.class.getName());
+
+    private static final String OPENAPI_RESPONSE_CONTENT = "content";
+    private static final String OPENAPI_RESPONSE_SCHEMA = "schema";
+    private static final String OPENAPI_SCHEMA_NOT = "not";
+    private static final String OPENAPI_SCHEMA_ONE_OF = "oneOf";
+    private static final String OPENAPI_SCHEMA_ANY_OF = "anyOf";
+    private static final String OPENAPI_SCHEMA_ALL_OF = "allOf";
+    private static final String OPENAPI_SCHEMA_IMPLEMENTATION = "implementation";
+
     SmallRyeOpenApiConfig openapi;
 
-    @ConfigRoot(name = "smallrye-openapi")
-    static final class SmallRyeOpenApiConfig {
-        /**
-         * The path at which to register the OpenAPI Servlet.
-         */
-        @ConfigItem(defaultValue = "/openapi")
-        String path;
-    }
-
-    List<HotDeploymentConfigFileBuildItem> configFiles() {
+    @BuildStep
+    List<HotDeploymentWatchedFileBuildItem> configFiles() {
         return Stream.of(META_INF_OPENAPI_YAML, WEB_INF_CLASSES_META_INF_OPENAPI_YAML,
                 META_INF_OPENAPI_YML, WEB_INF_CLASSES_META_INF_OPENAPI_YML,
-                META_INF_OPENAPI_JSON, WEB_INF_CLASSES_META_INF_OPENAPI_JSON).map(HotDeploymentConfigFileBuildItem::new)
+                META_INF_OPENAPI_JSON, WEB_INF_CLASSES_META_INF_OPENAPI_JSON).map(HotDeploymentWatchedFileBuildItem::new)
                 .collect(Collectors.toList());
     }
 
     @BuildStep
-    ServletBuildItem servlet() {
-        return ServletBuildItem.builder("openapi", OpenApiServlet.class.getName())
-                .addMapping(openapi.path).build();
+    @Record(ExecutionTime.STATIC_INIT)
+    RouteBuildItem handler(DeploymentClassLoaderBuildItem deploymentClassLoaderBuildItem, LaunchModeBuildItem launch,
+            BuildProducer<NotFoundPageDisplayableEndpointBuildItem> displayableEndpoints, OpenApiRecorder recorder,
+            ShutdownContextBuildItem shutdownContext) {
+        /*
+         * <em>Ugly Hack</em>
+         * In dev mode, we pass a classloader to load the up to date OpenAPI document.
+         * This hack is required because using the TCCL would get an outdated version - the initial one.
+         * This is because the worker thread on which the handler is called captures the TCCL at creation time
+         * and does not allow updating it.
+         *
+         * This classloader must ONLY be used to load the OpenAPI document.
+         *
+         * In non dev mode, the TCCL is used.
+         */
+        if (launch.getLaunchMode() == LaunchMode.DEVELOPMENT) {
+            recorder.setupClDevMode(shutdownContext);
+            displayableEndpoints.produce(new NotFoundPageDisplayableEndpointBuildItem(openapi.path));
+        }
+        return new RouteBuildItem(openapi.path, new OpenApiHandler(), HandlerType.BLOCKING);
     }
 
     @BuildStep
-    List<AdditionalBeanBuildItem> beans() {
-        return Arrays.asList(new AdditionalBeanBuildItem(OpenApiServlet.class),
-                new AdditionalBeanBuildItem(OpenApiDocumentProducer.class));
+    AdditionalBeanBuildItem beans() {
+        return new AdditionalBeanBuildItem(OpenApiDocumentProducer.class);
     }
 
     @BuildStep
-    @Record(STATIC_INIT)
-    public BeanContainerListenerBuildItem build(SmallRyeOpenApiTemplate template,
-            ApplicationArchivesBuildItem archivesBuildItem,
-            CombinedIndexBuildItem combinedIndexBuildItem, BuildProducer<FeatureBuildItem> feature,
-            ResteasyJaxrsConfig jaxrsConfig) throws Exception {
+    OpenApiFilteredIndexViewBuildItem smallryeOpenApiIndex(CombinedIndexBuildItem combinedIndexBuildItem,
+            BeanArchiveIndexBuildItem beanArchiveIndexBuildItem) {
+        CompositeIndex compositeIndex = CompositeIndex.create(combinedIndexBuildItem.getIndex(),
+                beanArchiveIndexBuildItem.getIndex());
+        return new OpenApiFilteredIndexViewBuildItem(
+                new FilteredIndexView(
+                        compositeIndex,
+                        new OpenApiConfigImpl(ConfigProvider.getConfig())));
+    }
+
+    @BuildStep
+    public void registerOpenApiSchemaClassesForReflection(BuildProducer<ReflectiveClassBuildItem> reflectiveClass,
+            BuildProducer<ReflectiveHierarchyBuildItem> reflectiveHierarchy,
+            OpenApiFilteredIndexViewBuildItem openApiFilteredIndexViewBuildItem) {
+
+        FilteredIndexView index = openApiFilteredIndexViewBuildItem.getIndex();
+        // Generate reflection declaration from MP OpenAPI Schema definition
+        // They are needed for serialization.
+        Collection<AnnotationInstance> schemaAnnotationInstances = index.getAnnotations(OPENAPI_SCHEMA);
+        for (AnnotationInstance schemaAnnotationInstance : schemaAnnotationInstances) {
+            AnnotationTarget typeTarget = schemaAnnotationInstance.target();
+            if (typeTarget.kind() != AnnotationTarget.Kind.CLASS) {
+                continue;
+            }
+            reflectiveHierarchy
+                    .produce(new ReflectiveHierarchyBuildItem(Type.create(typeTarget.asClass().name(), Type.Kind.CLASS),
+                            ResteasyDotNames.IGNORE_FOR_REFLECTION_PREDICATE));
+        }
+
+        // Generate reflection declaration from MP OpenAPI APIResponse schema definition
+        // They are needed for serialization
+        Collection<AnnotationInstance> apiResponseAnnotationInstances = index.getAnnotations(OPENAPI_RESPONSE);
+        registerReflectionForApiResponseSchemaSerialization(reflectiveClass, reflectiveHierarchy,
+                apiResponseAnnotationInstances);
+
+        // Generate reflection declaration from MP OpenAPI APIResponses schema definition
+        // They are needed for serialization
+        Collection<AnnotationInstance> apiResponsesAnnotationInstances = index.getAnnotations(OPENAPI_RESPONSES);
+        for (AnnotationInstance apiResponsesAnnotationInstance : apiResponsesAnnotationInstances) {
+            AnnotationValue apiResponsesAnnotationValue = apiResponsesAnnotationInstance.value();
+            if (apiResponsesAnnotationValue == null) {
+                continue;
+            }
+            registerReflectionForApiResponseSchemaSerialization(reflectiveClass, reflectiveHierarchy,
+                    Arrays.asList(apiResponsesAnnotationValue.asNestedArray()));
+        }
+    }
+
+    private void registerReflectionForApiResponseSchemaSerialization(BuildProducer<ReflectiveClassBuildItem> reflectiveClass,
+            BuildProducer<ReflectiveHierarchyBuildItem> reflectiveHierarchy,
+            Collection<AnnotationInstance> apiResponseAnnotationInstances) {
+        for (AnnotationInstance apiResponseAnnotationInstance : apiResponseAnnotationInstances) {
+            AnnotationValue contentAnnotationValue = apiResponseAnnotationInstance.value(OPENAPI_RESPONSE_CONTENT);
+            if (contentAnnotationValue == null) {
+                continue;
+            }
+
+            AnnotationInstance[] contents = contentAnnotationValue.asNestedArray();
+            for (AnnotationInstance content : contents) {
+                AnnotationValue annotationValue = content.value(OPENAPI_RESPONSE_SCHEMA);
+                if (annotationValue == null) {
+                    continue;
+                }
+                AnnotationInstance schema = annotationValue.asNested();
+                AnnotationValue schemaImplementationClass = schema.value(OPENAPI_SCHEMA_IMPLEMENTATION);
+                if (schemaImplementationClass != null) {
+                    reflectiveHierarchy.produce(new ReflectiveHierarchyBuildItem(schemaImplementationClass.asClass(),
+                            ResteasyDotNames.IGNORE_FOR_REFLECTION_PREDICATE));
+                }
+
+                AnnotationValue schemaNotClass = schema.value(OPENAPI_SCHEMA_NOT);
+                if (schemaNotClass != null) {
+                    reflectiveClass.produce(new ReflectiveClassBuildItem(true, true, schemaNotClass.asString()));
+                }
+
+                AnnotationValue schemaOneOfClasses = schema.value(OPENAPI_SCHEMA_ONE_OF);
+                if (schemaOneOfClasses != null) {
+                    for (Type schemaOneOfClass : schemaOneOfClasses.asClassArray()) {
+                        reflectiveHierarchy.produce(new ReflectiveHierarchyBuildItem(schemaOneOfClass,
+                                ResteasyDotNames.IGNORE_FOR_REFLECTION_PREDICATE));
+                    }
+                }
+
+                AnnotationValue schemaAnyOfClasses = schema.value(OPENAPI_SCHEMA_ANY_OF);
+                if (schemaAnyOfClasses != null) {
+                    for (Type schemaAnyOfClass : schemaAnyOfClasses.asClassArray()) {
+                        reflectiveHierarchy.produce(new ReflectiveHierarchyBuildItem(schemaAnyOfClass,
+                                ResteasyDotNames.IGNORE_FOR_REFLECTION_PREDICATE));
+                    }
+                }
+
+                AnnotationValue schemaAllOfClasses = schema.value(OPENAPI_SCHEMA_ALL_OF);
+                if (schemaAllOfClasses != null) {
+                    for (Type schemaAllOfClass : schemaAllOfClasses.asClassArray()) {
+                        reflectiveHierarchy.produce(new ReflectiveHierarchyBuildItem(schemaAllOfClass,
+                                ResteasyDotNames.IGNORE_FOR_REFLECTION_PREDICATE));
+                    }
+                }
+            }
+        }
+    }
+
+    @BuildStep(loadsApplicationClasses = true)
+    public void build(ApplicationArchivesBuildItem archivesBuildItem,
+            BuildProducer<FeatureBuildItem> feature,
+            Optional<ResteasyJaxrsConfigBuildItem> resteasyJaxrsConfig,
+            BuildProducer<GeneratedResourceBuildItem> resourceBuildItemBuildProducer,
+            BuildProducer<NativeImageResourceBuildItem> nativeImageResources,
+            OpenApiFilteredIndexViewBuildItem openApiFilteredIndexViewBuildItem) throws Exception {
+        FilteredIndexView index = openApiFilteredIndexViewBuildItem.getIndex();
+
         feature.produce(new FeatureBuildItem(FeatureBuildItem.SMALLRYE_OPENAPI));
-        OpenAPI sm = generateStaticModel(archivesBuildItem);
-        OpenAPI am = generateAnnotationModel(combinedIndexBuildItem.getIndex(), jaxrsConfig);
-        return new BeanContainerListenerBuildItem(template.setupModel(sm, am));
+        OpenAPI staticModel = generateStaticModel(archivesBuildItem);
+
+        OpenAPI annotationModel;
+        Config config = ConfigProvider.getConfig();
+        boolean scanDisable = config.getOptionalValue(OASConfig.SCAN_DISABLE, Boolean.class).orElse(false);
+        if (resteasyJaxrsConfig.isPresent() && !scanDisable) {
+            annotationModel = generateAnnotationModel(index, resteasyJaxrsConfig.get());
+        } else {
+            annotationModel = null;
+        }
+        OpenApiDocument finalDocument = loadDocument(staticModel, annotationModel);
+        for (OpenApiSerializer.Format format : OpenApiSerializer.Format.values()) {
+            String name = OpenApiHandler.BASE_NAME + format;
+            resourceBuildItemBuildProducer.produce(new GeneratedResourceBuildItem(name,
+                    OpenApiSerializer.serialize(finalDocument.get(), format).getBytes(StandardCharsets.UTF_8)));
+            nativeImageResources.produce(new NativeImageResourceBuildItem(name));
+        }
+    }
+
+    @BuildStep
+    LogCleanupFilterBuildItem logCleanup() {
+        return new LogCleanupFilterBuildItem("io.smallrye.openapi.api.OpenApiDocument",
+                "OpenAPI document initialized:");
     }
 
     private OpenAPI generateStaticModel(ApplicationArchivesBuildItem archivesBuildItem) throws IOException {
@@ -120,11 +282,26 @@ public class SmallRyeOpenApiProcessor {
         return null;
     }
 
-    private OpenAPI generateAnnotationModel(IndexView indexView, ResteasyJaxrsConfig jaxrsConfig) {
+    private OpenAPI generateAnnotationModel(IndexView indexView, ResteasyJaxrsConfigBuildItem jaxrsConfig) {
+        // build a composite index with additional JDK classes, because SmallRye-OpenAPI will check if some
+        // app types implement Map and Collection and will go through super classes until Object is reached,
+        // and yes, it even checks Object
+        // see https://github.com/quarkusio/quarkus/issues/2961
+        Indexer indexer = new Indexer();
+        Set<DotName> additionalIndex = new HashSet<>();
+        IndexingUtil.indexClass(Collection.class.getName(), indexer, indexView, additionalIndex,
+                SmallRyeOpenApiProcessor.class.getClassLoader());
+        IndexingUtil.indexClass(Map.class.getName(), indexer, indexView, additionalIndex,
+                SmallRyeOpenApiProcessor.class.getClassLoader());
+        IndexingUtil.indexClass(Object.class.getName(), indexer, indexView, additionalIndex,
+                SmallRyeOpenApiProcessor.class.getClassLoader());
+
+        CompositeIndex compositeIndex = CompositeIndex.create(indexView, indexer.complete());
+
         Config config = ConfigProvider.getConfig();
         OpenApiConfig openApiConfig = new OpenApiConfigImpl(config);
-        return new OpenApiAnnotationScanner(openApiConfig, indexView,
-                Collections.singletonList(new RESTEasyExtension(jaxrsConfig, indexView))).scan();
+        return new OpenApiAnnotationScanner(openApiConfig, compositeIndex,
+                Collections.singletonList(new RESTEasyExtension(jaxrsConfig, compositeIndex))).scan();
     }
 
     private Result findStaticModel(ApplicationArchivesBuildItem archivesBuildItem) {
@@ -166,4 +343,33 @@ public class SmallRyeOpenApiProcessor {
         }
     }
 
+    public OpenApiDocument loadDocument(OpenAPI staticModel, OpenAPI annotationModel) {
+        Config config = ConfigProvider.getConfig();
+        OpenApiConfig openApiConfig = new OpenApiConfigImpl(config);
+
+        OpenAPI readerModel = OpenApiProcessor.modelFromReader(openApiConfig,
+                Thread.currentThread().getContextClassLoader());
+
+        OpenApiDocument document = createDocument(openApiConfig);
+        if (annotationModel != null) {
+            document.modelFromAnnotations(annotationModel);
+        }
+        document.modelFromReader(readerModel);
+        document.modelFromStaticFile(staticModel);
+        document.filter(filter(openApiConfig));
+        document.initialize();
+        return document;
+    }
+
+    private OpenApiDocument createDocument(OpenApiConfig openApiConfig) {
+        OpenApiDocument document = OpenApiDocument.INSTANCE;
+        document.reset();
+        document.config(openApiConfig);
+        return document;
+    }
+
+    private OASFilter filter(OpenApiConfig openApiConfig) {
+        return OpenApiProcessor.getFilter(openApiConfig,
+                Thread.currentThread().getContextClassLoader());
+    }
 }

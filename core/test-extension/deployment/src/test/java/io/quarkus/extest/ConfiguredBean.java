@@ -1,26 +1,26 @@
 package io.quarkus.extest;
 
-import javax.enterprise.context.ApplicationScoped;
 import javax.enterprise.event.Observes;
-import javax.inject.Inject;
 
 import io.quarkus.extest.runtime.IConfigConsumer;
 import io.quarkus.extest.runtime.TestAnnotation;
-import io.quarkus.extest.runtime.TestBuildAndRunTimeConfig;
-import io.quarkus.extest.runtime.TestRunTimeConfig;
+import io.quarkus.extest.runtime.config.FooRuntimeConfig;
+import io.quarkus.extest.runtime.config.TestBuildAndRunTimeConfig;
+import io.quarkus.extest.runtime.config.TestRunTimeConfig;
+import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 
 /**
  * A sample bean
  */
 @TestAnnotation
-@ApplicationScoped
 public class ConfiguredBean implements IConfigConsumer {
-    TestRunTimeConfig runTimeConfig;
-    TestBuildAndRunTimeConfig buildTimeConfig;
+    volatile TestRunTimeConfig runTimeConfig;
+    volatile TestBuildAndRunTimeConfig buildTimeConfig;
+    volatile FooRuntimeConfig fooRuntimeConfig;
 
     public ConfiguredBean() {
-        System.out.printf("ConfiguredBean.ctor, %s\n", super.toString());
+        System.out.printf("ConfiguredBean.ctor, %s%n", super.toString());
     }
 
     /**
@@ -29,10 +29,13 @@ public class ConfiguredBean implements IConfigConsumer {
      * @param runTimeConfig
      */
     @Override
-    public void loadConfig(TestBuildAndRunTimeConfig buildTimeConfig, TestRunTimeConfig runTimeConfig) {
-        System.out.printf("loadConfig, buildTimeConfig=%s, runTimeConfig=%s\n", buildTimeConfig, runTimeConfig);
+    public void loadConfig(TestBuildAndRunTimeConfig buildTimeConfig, TestRunTimeConfig runTimeConfig,
+            FooRuntimeConfig fooRuntimeConfig) {
+        System.out.printf("loadConfig, buildTimeConfig=%s, runTimeConfig=%s, fooRuntimeConfig=%s%n", buildTimeConfig,
+                runTimeConfig, fooRuntimeConfig);
         this.buildTimeConfig = buildTimeConfig;
         this.runTimeConfig = runTimeConfig;
+        this.fooRuntimeConfig = fooRuntimeConfig;
     }
 
     /**
@@ -41,7 +44,11 @@ public class ConfiguredBean implements IConfigConsumer {
      * @param event
      */
     void onStart(@Observes StartupEvent event) {
-        System.out.printf("onStart, event=%s\n", event);
+        System.out.printf("onStart, event=%s%n", event);
+    }
+
+    void onStop(@Observes ShutdownEvent event) {
+        System.out.printf("onStop, event=%s%n", event);
     }
 
     public TestRunTimeConfig getRunTimeConfig() {
@@ -52,10 +59,12 @@ public class ConfiguredBean implements IConfigConsumer {
         return buildTimeConfig;
     }
 
+    public FooRuntimeConfig getFooRuntimeConfig() {
+        return fooRuntimeConfig;
+    }
+
     @Override
     public String toString() {
-        return "ConfiguredBean{" +
-                "runTimeConfig=" + runTimeConfig +
-                '}';
+        return "ConfiguredBean{runTimeConfig=" + runTimeConfig + '}';
     }
 }

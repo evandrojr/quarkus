@@ -1,8 +1,8 @@
 package io.quarkus.cli.commands;
 
 import java.io.File;
-import java.io.IOException;
 import java.util.Collections;
+import java.util.List;
 
 import org.aesh.command.Command;
 import org.aesh.command.CommandDefinition;
@@ -13,8 +13,10 @@ import org.aesh.command.option.Argument;
 import org.aesh.command.option.Option;
 import org.aesh.io.Resource;
 
+import io.quarkus.cli.commands.writer.FileProjectWriter;
 import io.quarkus.dependencies.Extension;
-import io.quarkus.maven.utilities.MojoUtils;
+import io.quarkus.platform.descriptor.QuarkusPlatformDescriptor;
+import io.quarkus.platform.tools.config.QuarkusPlatformConfig;
 
 /**
  * @author <a href="mailto:stalep@gmail.com">Ståle Pedersen</a>
@@ -37,15 +39,23 @@ public class AddExtensionCommand implements Command<CommandInvocation> {
             commandInvocation.println(commandInvocation.getHelpInfo("quarkus add-extension"));
             return CommandResult.SUCCESS;
         } else {
-            if (!findExtension(extension)) {
+
+            final QuarkusPlatformDescriptor platformDescr = QuarkusPlatformConfig.getGlobalDefault().getPlatformDescriptor();
+            if (!findExtension(extension, platformDescr.getExtensions())) {
                 commandInvocation.println("Can not find any extension named: " + extension);
                 return CommandResult.SUCCESS;
-            } else if (pom.isLeaf()) {
+            }
+            if (pom.isLeaf()) {
                 try {
-                    AddExtensions project = new AddExtensions(new File(pom.getAbsolutePath()));
-                    project.addExtensions(Collections.singleton(extension));
-                } catch (IOException e) {
-                    e.printStackTrace();
+                    final File pomFile = new File(pom.getAbsolutePath());
+                    AddExtensions project = new AddExtensions(new FileProjectWriter(pomFile.getParentFile()), platformDescr)
+                            .extensions(Collections.singleton(extension));
+                    QuarkusCommandOutcome result = project.execute();
+                    if (!result.isSuccess()) {
+                        throw new CommandException("Unable to add an extension matching " + extension);
+                    }
+                } catch (Exception e) {
+                    throw new CommandException("Unable to add an extension matching " + extension, e);
                 }
             }
 
@@ -54,10 +64,11 @@ public class AddExtensionCommand implements Command<CommandInvocation> {
         return CommandResult.SUCCESS;
     }
 
-    private boolean findExtension(String name) {
-        for (Extension ext : MojoUtils.loadExtensions()) {
-            if (ext.getName().equalsIgnoreCase(name))
+    private boolean findExtension(String name, List<Extension> extensions) {
+        for (Extension ext : extensions) {
+            if (ext.getName().equalsIgnoreCase(name)) {
                 return true;
+            }
         }
         return false;
     }

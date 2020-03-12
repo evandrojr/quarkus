@@ -2,6 +2,7 @@ package io.quarkus.hibernate.validator.runtime.jaxrs;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import javax.annotation.Priority;
@@ -12,6 +13,7 @@ import javax.interceptor.InvocationContext;
 import javax.validation.ConstraintViolationException;
 import javax.ws.rs.core.MediaType;
 
+import org.jboss.logging.Logger;
 import org.jboss.resteasy.util.MediaTypeHelper;
 
 import io.quarkus.hibernate.validator.runtime.interceptor.AbstractMethodValidationInterceptor;
@@ -20,6 +22,8 @@ import io.quarkus.hibernate.validator.runtime.interceptor.AbstractMethodValidati
 @Interceptor
 @Priority(Interceptor.Priority.PLATFORM_AFTER + 800)
 public class JaxrsEndPointValidationInterceptor extends AbstractMethodValidationInterceptor {
+
+    private static final Logger LOGGER = Logger.getLogger(JaxrsEndPointValidationInterceptor.class);
 
     @AroundInvoke
     @Override
@@ -38,6 +42,12 @@ public class JaxrsEndPointValidationInterceptor extends AbstractMethodValidation
     }
 
     private List<MediaType> getAccept(Method method) {
-        return Arrays.asList(MediaTypeHelper.getProduces(method.getDeclaringClass(), method));
+        MediaType[] producedMediaTypes = MediaTypeHelper.getProduces(method.getDeclaringClass(), method);
+
+        if (producedMediaTypes == null) {
+            return Collections.emptyList();
+        }
+
+        return Arrays.asList(producedMediaTypes);
     }
 }

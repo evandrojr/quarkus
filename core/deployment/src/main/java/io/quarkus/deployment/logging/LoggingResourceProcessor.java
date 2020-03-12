@@ -1,24 +1,11 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.deployment.logging;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Consumer;
-import java.util.logging.Level;
+import java.util.function.Supplier;
+import java.util.logging.Handler;
+import java.util.stream.Collectors;
 
 import org.jboss.logmanager.EmbeddedConfigurator;
 
@@ -26,20 +13,20 @@ import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
 import io.quarkus.deployment.annotations.ExecutionTime;
 import io.quarkus.deployment.annotations.Record;
-import io.quarkus.deployment.builditem.ConfigurationCustomConverterBuildItem;
+import io.quarkus.deployment.builditem.ConsoleFormatterBannerBuildItem;
 import io.quarkus.deployment.builditem.LogCategoryBuildItem;
+import io.quarkus.deployment.builditem.LogConsoleFormatBuildItem;
+import io.quarkus.deployment.builditem.LogHandlerBuildItem;
 import io.quarkus.deployment.builditem.RunTimeConfigurationDefaultBuildItem;
 import io.quarkus.deployment.builditem.SystemPropertyBuildItem;
-import io.quarkus.deployment.builditem.substrate.RuntimeInitializedClassBuildItem;
-import io.quarkus.deployment.builditem.substrate.ServiceProviderBuildItem;
-import io.quarkus.deployment.builditem.substrate.SubstrateSystemPropertyBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.NativeImageSystemPropertyBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.RuntimeInitializedClassBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.ServiceProviderBuildItem;
+import io.quarkus.runtime.RuntimeValue;
 import io.quarkus.runtime.logging.InitialConfigurator;
-import io.quarkus.runtime.logging.LevelConverter;
 import io.quarkus.runtime.logging.LogConfig;
-import io.quarkus.runtime.logging.LoggingSetupTemplate;
+import io.quarkus.runtime.logging.LoggingSetupRecorder;
 
-/**
- */
 public final class LoggingResourceProcessor {
 
     @BuildStep
@@ -67,42 +54,60 @@ public final class LoggingResourceProcessor {
     void setUpDefaultLogCleanupFilters(List<LogCleanupFilterBuildItem> logCleanupFilters,
             Consumer<RunTimeConfigurationDefaultBuildItem> configOutput) {
         for (LogCleanupFilterBuildItem logCleanupFilter : logCleanupFilters) {
+            String startsWithClause = logCleanupFilter.getFilterElement().getMessageStarts().stream()
+                    // SmallRye Config escaping is pretty naive so we only need to escape commas
+                    .map(s -> s.replace(",", "\\,"))
+                    .collect(Collectors.joining(","));
             configOutput.accept(
                     new RunTimeConfigurationDefaultBuildItem(
                             "quarkus.log.filter.\"" + logCleanupFilter.getFilterElement().getLoggerName()
                                     + "\".if-starts-with",
-                            logCleanupFilter.getFilterElement().getMessageStart()));
+                            startsWithClause));
         }
     }
 
     @BuildStep
     void miscSetup(
             Consumer<RuntimeInitializedClassBuildItem> runtimeInit,
-            Consumer<SubstrateSystemPropertyBuildItem> systemProp,
+            Consumer<NativeImageSystemPropertyBuildItem> systemProp,
             Consumer<ServiceProviderBuildItem> provider) {
         runtimeInit.accept(new RuntimeInitializedClassBuildItem("org.jboss.logmanager.formatters.TrueColorHolder"));
-        systemProp.accept(new SubstrateSystemPropertyBuildItem("java.util.logging.manager", "org.jboss.logmanager.LogManager"));
+        systemProp
+                .accept(new NativeImageSystemPropertyBuildItem("java.util.logging.manager", "org.jboss.logmanager.LogManager"));
         provider.accept(
                 new ServiceProviderBuildItem(EmbeddedConfigurator.class.getName(), InitialConfigurator.class.getName()));
     }
 
     @BuildStep
     @Record(ExecutionTime.RUNTIME_INIT)
-    void setupLoggingRuntimeInit(LoggingSetupTemplate setupTemplate, LogConfig log) {
-        setupTemplate.initializeLogging(log);
+    void setupLoggingRuntimeInit(LoggingSetupRecorder recorder, LogConfig log, List<LogHandlerBuildItem> handlers,
+            List<LogConsoleFormatBuildItem> consoleFormatItems,
+            Optional<ConsoleFormatterBannerBuildItem> possibleBannerBuildItem) {
+        final List<RuntimeValue<Optional<Handler>>> list = handlers.stream().map(LogHandlerBuildItem::getHandlerValue)
+                .collect(Collectors.toList());
+
+        ConsoleFormatterBannerBuildItem bannerBuildItem = null;
+        RuntimeValue<Optional<Supplier<String>>> possibleSupplier = null;
+        if (possibleBannerBuildItem.isPresent()) {
+            bannerBuildItem = possibleBannerBuildItem.get();
+        }
+        if (bannerBuildItem != null) {
+            possibleSupplier = bannerBuildItem.getBannerSupplier();
+        }
+        recorder.initializeLogging(log, list,
+                consoleFormatItems.stream().map(LogConsoleFormatBuildItem::getFormatterValue).collect(Collectors.toList()),
+                possibleSupplier);
     }
 
     @BuildStep
     @Record(ExecutionTime.STATIC_INIT)
-    void setupLoggingStaticInit(LoggingSetupTemplate setupTemplate, LogConfig log) {
-        setupTemplate.initializeLogging(log);
+    void setupLoggingStaticInit(LoggingSetupRecorder recorder) {
+        recorder.initializeLoggingForImageBuild();
     }
 
+    // This is specifically to help out with presentations, to allow an env var to always override this value
     @BuildStep
-    ConfigurationCustomConverterBuildItem setUpLevelConverter() {
-        return new ConfigurationCustomConverterBuildItem(
-                200,
-                Level.class,
-                LevelConverter.class);
+    void setUpDarkeningDefault(Consumer<RunTimeConfigurationDefaultBuildItem> rtcConsumer) {
+        rtcConsumer.accept(new RunTimeConfigurationDefaultBuildItem("quarkus.log.console.darken", "0"));
     }
 }

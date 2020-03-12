@@ -12,7 +12,6 @@ import org.eclipse.microprofile.jwt.Claims;
 import org.jboss.shrinkwrap.api.ShrinkWrap;
 import org.jboss.shrinkwrap.api.spec.JavaArchive;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -23,7 +22,8 @@ import io.restassured.response.Response;
 
 public class JwtAuthUnitTest {
     private static Class[] testClasses = {
-            JsonValuejectionEndpoint.class
+            JsonValuejectionEndpoint.class,
+            TokenUtils.class
     };
     /**
      * The test generated JWT token string
@@ -38,6 +38,9 @@ public class JwtAuthUnitTest {
     static final QuarkusUnitTest config = new QuarkusUnitTest()
             .setArchiveProducer(() -> ShrinkWrap.create(JavaArchive.class)
                     .addClasses(testClasses)
+                    .addAsResource("publicKey.pem")
+                    .addAsResource("privateKey.pem")
+                    .addAsResource("Token1.json")
                     .addAsResource("application.properties"));
 
     @BeforeEach
@@ -59,10 +62,9 @@ public class JwtAuthUnitTest {
     /**
      * Verify that the injected token issuer claim is as expected
      *
-     * @throws Exception
      */
     @Test()
-    public void verifyIssuerClaim() throws Exception {
+    public void verifyIssuerClaim() {
         Response response = RestAssured.given().auth()
                 .oauth2(token)
                 .when()

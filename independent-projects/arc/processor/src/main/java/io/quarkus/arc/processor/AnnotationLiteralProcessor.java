@@ -1,22 +1,6 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.arc.processor;
 
-import io.quarkus.arc.ComputingCache;
+import io.quarkus.arc.impl.ComputingCache;
 import io.quarkus.gizmo.BytecodeCreator;
 import io.quarkus.gizmo.ClassOutput;
 import io.quarkus.gizmo.MethodDescriptor;
@@ -89,7 +73,9 @@ class AnnotationLiteralProcessor {
                     value = method.defaultValue();
                 }
                 if (value == null) {
-                    throw new NullPointerException("Value not set for " + method);
+                    throw new IllegalStateException(String.format(
+                            "Value is not set for %s.%s(). Most probably an older version of Jandex was used to index an application dependency. Make sure that Jandex 2.1+ is used.",
+                            method.declaringClass().name(), method.name()));
                 }
                 ResultHandle retValue = AnnotationLiteralGenerator.loadValue(bytecode, value, annotationClass, method);
                 constructorParams[iterator.previousIndex()] = retValue;

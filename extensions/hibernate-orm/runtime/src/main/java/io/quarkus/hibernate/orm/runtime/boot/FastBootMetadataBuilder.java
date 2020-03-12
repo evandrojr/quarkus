@@ -1,19 +1,3 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.hibernate.orm.runtime.boot;
 
 import static org.hibernate.cfg.AvailableSettings.DRIVER;
@@ -23,15 +7,11 @@ import static org.hibernate.cfg.AvailableSettings.JPA_JDBC_DRIVER;
 import static org.hibernate.cfg.AvailableSettings.JPA_JDBC_PASSWORD;
 import static org.hibernate.cfg.AvailableSettings.JPA_JDBC_URL;
 import static org.hibernate.cfg.AvailableSettings.JPA_JDBC_USER;
-import static org.hibernate.cfg.AvailableSettings.JPA_SHARED_CACHE_MODE;
 import static org.hibernate.cfg.AvailableSettings.JPA_TRANSACTION_TYPE;
 import static org.hibernate.cfg.AvailableSettings.PASS;
 import static org.hibernate.cfg.AvailableSettings.TRANSACTION_COORDINATOR_STRATEGY;
 import static org.hibernate.cfg.AvailableSettings.URL;
 import static org.hibernate.cfg.AvailableSettings.USER;
-import static org.hibernate.cfg.AvailableSettings.USE_DIRECT_REFERENCE_CACHE_ENTRIES;
-import static org.hibernate.cfg.AvailableSettings.USE_QUERY_CACHE;
-import static org.hibernate.cfg.AvailableSettings.USE_SECOND_LEVEL_CACHE;
 import static org.hibernate.cfg.AvailableSettings.WRAP_RESULT_SETS;
 import static org.hibernate.cfg.AvailableSettings.XML_MAPPING_ENABLED;
 import static org.hibernate.internal.HEMLogging.messageLogger;
@@ -40,14 +20,15 @@ import static org.hibernate.jpa.AvailableSettings.COLLECTION_CACHE_PREFIX;
 import static org.hibernate.jpa.AvailableSettings.PERSISTENCE_UNIT_NAME;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.StringTokenizer;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.persistence.PersistenceException;
-import javax.persistence.SharedCacheMode;
 import javax.persistence.spi.PersistenceUnitTransactionType;
 
 import org.hibernate.boot.CacheRegionDefinition;
@@ -67,14 +48,14 @@ import org.hibernate.boot.registry.selector.spi.StrategySelector;
 import org.hibernate.boot.spi.MetadataBuilderContributor;
 import org.hibernate.boot.spi.MetadataBuilderImplementor;
 import org.hibernate.boot.spi.MetadataImplementor;
+import org.hibernate.cache.internal.CollectionCacheInvalidator;
 import org.hibernate.cfg.AvailableSettings;
-import org.hibernate.cfg.Environment;
 import org.hibernate.cfg.beanvalidation.BeanValidationIntegrator;
 import org.hibernate.dialect.Dialect;
 import org.hibernate.engine.jdbc.dialect.spi.DialectFactory;
-import org.hibernate.engine.transaction.jta.platform.internal.JBossStandAloneJtaPlatform;
 import org.hibernate.engine.transaction.jta.platform.spi.JtaPlatform;
 import org.hibernate.id.factory.spi.MutableIdentifierGeneratorFactory;
+import org.hibernate.integrator.spi.Integrator;
 import org.hibernate.internal.EntityManagerMessageLogger;
 import org.hibernate.internal.util.StringHelper;
 import org.hibernate.jpa.boot.internal.EntityManagerFactoryBuilderImpl;
@@ -86,10 +67,16 @@ import org.hibernate.jpa.internal.util.PersistenceUnitTransactionTypeHelper;
 import org.hibernate.jpa.spi.IdentifierGeneratorStrategyProvider;
 import org.hibernate.resource.transaction.backend.jdbc.internal.JdbcResourceLocalTransactionCoordinatorBuilderImpl;
 import org.hibernate.resource.transaction.backend.jta.internal.JtaTransactionCoordinatorBuilderImpl;
+import org.hibernate.service.Service;
 import org.hibernate.service.internal.AbstractServiceRegistryImpl;
+import org.hibernate.service.internal.ProvidedService;
 import org.infinispan.quarkus.hibernate.cache.QuarkusInfinispanRegionFactory;
 
 import io.quarkus.hibernate.orm.runtime.BuildTimeSettings;
+import io.quarkus.hibernate.orm.runtime.IntegrationSettings;
+import io.quarkus.hibernate.orm.runtime.customized.QuarkusJtaPlatform;
+import io.quarkus.hibernate.orm.runtime.integration.HibernateOrmIntegrations;
+import io.quarkus.hibernate.orm.runtime.proxies.ProxyDefinitions;
 import io.quarkus.hibernate.orm.runtime.recording.RecordableBootstrap;
 import io.quarkus.hibernate.orm.runtime.recording.RecordedState;
 import io.quarkus.hibernate.orm.runtime.recording.RecordingDialectFactory;
@@ -109,10 +96,14 @@ public class FastBootMetadataBuilder {
     private final ManagedResources managedResources;
     private final MetadataBuilderImplementor metamodelBuilder;
     private final Object validatorFactory;
+    private final Collection<Class<? extends Integrator>> additionalIntegrators;
+    private final Collection<ProvidedService> providedServices;
 
     @SuppressWarnings("unchecked")
-    public FastBootMetadataBuilder(final PersistenceUnitDescriptor persistenceUnit, Scanner scanner) {
+    public FastBootMetadataBuilder(final PersistenceUnitDescriptor persistenceUnit, Scanner scanner,
+            Collection<Class<? extends Integrator>> additionalIntegrators) {
         this.persistenceUnit = persistenceUnit;
+        this.additionalIntegrators = additionalIntegrators;
         final ClassLoaderService providedClassLoaderService = FlatClassLoaderService.INSTANCE;
 
         // Copying semantics from: new EntityManagerFactoryBuilderImpl( unit,
@@ -138,6 +129,30 @@ public class FastBootMetadataBuilder {
         ssrBuilder.applySettings(buildTimeSettings.getSettings());
         this.standardServiceRegistry = ssrBuilder.build();
         registerIdentifierGenerators(standardServiceRegistry);
+
+        this.providedServices = ssrBuilder.getProvidedServices();
+
+        /**
+         * This is required to properly integrate Hibernate Envers.
+         *
+         * The EnversService requires multiple steps to be properly built, the most important ones are:
+         *
+         * 1. The EnversServiceContributor contributes the EnversServiceInitiator to the RecordableBootstrap.
+         * 2. After RecordableBootstrap builds a StandardServiceRegistry, the first time the EnversService is
+         * requested, it is created by the initiator and configured by the registry.
+         * 3. The MetadataBuildingProcess completes by calling the AdditionalJaxbMappingProducer which
+         * initializes the EnversService and produces some additional mapping documents.
+         * 4. After that point the EnversService appears to be fully functional.
+         *
+         * The following trick uses the aforementioned steps to setup the EnversService and then turns it into
+         * a ProvidedService so that it is not necessary to repeat all these complex steps during the reactivation
+         * of the destroyed service registry in PreconfiguredServiceRegistryBuilder.
+         *
+         */
+        for (Class<? extends Service> postBuildProvidedService : ssrBuilder.getPostBuildProvidedServices()) {
+            providedServices.add(new ProvidedService(postBuildProvidedService,
+                    standardServiceRegistry.getService(postBuildProvidedService)));
+        }
 
         final MetadataSources metadataSources = new MetadataSources(bsr);
         addPUManagedClassNamesToMetadataSources(persistenceUnit, metadataSources);
@@ -204,52 +219,72 @@ public class FastBootMetadataBuilder {
     @SuppressWarnings({ "unchecked", "rawtypes" })
     private MergedSettings mergeSettings(PersistenceUnitDescriptor persistenceUnit) {
         final MergedSettings mergedSettings = new MergedSettings();
+        final Map cfg = mergedSettings.configurationValues;
 
         // first, apply persistence.xml-defined settings
         if (persistenceUnit.getProperties() != null) {
-            mergedSettings.configurationValues.putAll(persistenceUnit.getProperties());
+            cfg.putAll(persistenceUnit.getProperties());
         }
 
-        mergedSettings.configurationValues.put(PERSISTENCE_UNIT_NAME, persistenceUnit.getName());
+        cfg.put(PERSISTENCE_UNIT_NAME, persistenceUnit.getName());
 
-        applyTransactionProperties(persistenceUnit, mergedSettings.configurationValues);
-        applyJdbcConnectionProperties(mergedSettings.configurationValues);
+        applyTransactionProperties(persistenceUnit, cfg);
+        applyJdbcConnectionProperties(cfg);
 
         // unsupported FLUSH_BEFORE_COMPLETION
 
-        if (readBooleanConfigurationValue(mergedSettings.configurationValues, Environment.FLUSH_BEFORE_COMPLETION)) {
-            mergedSettings.configurationValues.put(Environment.FLUSH_BEFORE_COMPLETION, "false");
-            LOG.definingFlushBeforeCompletionIgnoredInHem(Environment.FLUSH_BEFORE_COMPLETION);
+        if (readBooleanConfigurationValue(cfg, AvailableSettings.FLUSH_BEFORE_COMPLETION)) {
+            cfg.put(AvailableSettings.FLUSH_BEFORE_COMPLETION, "false");
+            LOG.definingFlushBeforeCompletionIgnoredInHem(AvailableSettings.FLUSH_BEFORE_COMPLETION);
         }
 
         // Quarkus specific
 
-        mergedSettings.configurationValues.put("hibernate.temp.use_jdbc_metadata_defaults", "false");
+        cfg.put("hibernate.temp.use_jdbc_metadata_defaults", "false");
 
-        if (readBooleanConfigurationValue(mergedSettings.configurationValues, WRAP_RESULT_SETS)) {
+        //This shouldn't be encouraged but sometimes it's really useful - and it used to be the default
+        //in Hibernate ORM before the JPA spec would require to change this.
+        //At this time of transitioning we'll only expose it as a global system property, so to allow usage
+        //for special circumstances and yet not encourage this.
+        //Also, definitely don't override anything which was explicitly set in the configuration.
+        if (!cfg.containsKey(AvailableSettings.ALLOW_UPDATE_OUTSIDE_TRANSACTION)) {
+            cfg.put(AvailableSettings.ALLOW_UPDATE_OUTSIDE_TRANSACTION,
+                    Boolean.getBoolean(AvailableSettings.ALLOW_UPDATE_OUTSIDE_TRANSACTION));
+        }
+
+        //Enable the new Enhanced Proxies capability (unless it was specifically disabled):
+        if (!cfg.containsKey(AvailableSettings.ALLOW_ENHANCEMENT_AS_PROXY)) {
+            cfg.put(AvailableSettings.ALLOW_ENHANCEMENT_AS_PROXY, Boolean.TRUE.toString());
+        }
+        //Always Order batch updates as it prevents contention on the data (unless it was disabled)
+        if (!cfg.containsKey(AvailableSettings.ORDER_UPDATES)) {
+            cfg.put(AvailableSettings.ORDER_UPDATES, Boolean.TRUE.toString());
+        }
+        //Agroal already does disable auto-commit, so Hibernate ORM should trust that:
+        cfg.put(AvailableSettings.CONNECTION_PROVIDER_DISABLES_AUTOCOMMIT, Boolean.TRUE.toString());
+
+        if (readBooleanConfigurationValue(cfg, WRAP_RESULT_SETS)) {
             LOG.warn("Wrapping result sets is not supported. Setting " + WRAP_RESULT_SETS + " to false.");
         }
-        mergedSettings.configurationValues.put(WRAP_RESULT_SETS, "false");
+        cfg.put(WRAP_RESULT_SETS, "false");
 
-        if (readBooleanConfigurationValue(mergedSettings.configurationValues, XML_MAPPING_ENABLED)) {
+        if (readBooleanConfigurationValue(cfg, XML_MAPPING_ENABLED)) {
             LOG.warn("XML mapping is not supported. Setting " + XML_MAPPING_ENABLED + " to false.");
         }
-        mergedSettings.configurationValues.put(XML_MAPPING_ENABLED, "false");
+        cfg.put(XML_MAPPING_ENABLED, "false");
 
         // Note: this one is not a boolean, just having the property enables it
-        if (mergedSettings.configurationValues.containsKey(JACC_ENABLED)) {
+        if (cfg.containsKey(JACC_ENABLED)) {
             LOG.warn("JACC is not supported. Disabling it.");
         }
-        mergedSettings.configurationValues.remove(JACC_ENABLED);
-
-        enableCachingByDefault(mergedSettings.configurationValues);
+        cfg.remove(JACC_ENABLED);
 
         // here we are going to iterate the merged config settings looking for:
         // 1) additional JACC permissions
         // 2) additional cache region declarations
         //
         // we will also clean up any references with null entries
-        Iterator itr = mergedSettings.configurationValues.entrySet().iterator();
+        Iterator itr = cfg.entrySet().iterator();
         while (itr.hasNext()) {
             final Map.Entry entry = (Map.Entry) itr.next();
             if (entry.getValue() == null) {
@@ -277,21 +312,12 @@ public class FastBootMetadataBuilder {
             }
         }
 
-        mergedSettings.configurationValues.put(org.hibernate.cfg.AvailableSettings.CACHE_REGION_FACTORY,
+        cfg.put(org.hibernate.cfg.AvailableSettings.CACHE_REGION_FACTORY,
                 QuarkusInfinispanRegionFactory.class.getName());
 
-        return mergedSettings;
-    }
+        HibernateOrmIntegrations.contributeBootProperties((k, v) -> cfg.put(k, v));
 
-    /**
-     * Enable 2LC for entities and queries by default. Also allow "reference caching" by default.
-     */
-    private void enableCachingByDefault(final Map<String, Object> configurationValues) {
-        //Only set these if the user isn't making an explicit choice:
-        configurationValues.putIfAbsent(USE_DIRECT_REFERENCE_CACHE_ENTRIES, Boolean.TRUE);
-        configurationValues.putIfAbsent(USE_SECOND_LEVEL_CACHE, Boolean.TRUE);
-        configurationValues.putIfAbsent(USE_QUERY_CACHE, Boolean.TRUE);
-        configurationValues.putIfAbsent(JPA_SHARED_CACHE_MODE, SharedCacheMode.ENABLE_SELECTIVE);
+        return mergedSettings;
     }
 
     public RecordedState build() {
@@ -300,11 +326,18 @@ public class FastBootMetadataBuilder {
                 metamodelBuilder.getBootstrapContext(),
                 metamodelBuilder.getMetadataBuildingOptions() //INTERCEPT & DESTROY :)
         );
+
+        IntegrationSettings.Builder integrationSettingsBuilder = new IntegrationSettings.Builder();
+        HibernateOrmIntegrations.onMetadataInitialized(fullMeta, metamodelBuilder.getBootstrapContext(),
+                (k, v) -> integrationSettingsBuilder.put(k, v));
+
         Dialect dialect = extractDialect();
         JtaPlatform jtaPlatform = extractJtaPlatform();
         destroyServiceRegistry(fullMeta);
         MetadataImplementor storeableMetadata = trimBootstrapMetadata(fullMeta);
-        return new RecordedState(dialect, jtaPlatform, storeableMetadata, buildTimeSettings);
+        ProxyDefinitions proxyClassDefinitions = ProxyDefinitions.createFromMetadata(storeableMetadata);
+        return new RecordedState(dialect, jtaPlatform, storeableMetadata, buildTimeSettings, getIntegrators(),
+                providedServices, integrationSettingsBuilder.build(), proxyClassDefinitions);
     }
 
     private void destroyServiceRegistry(MetadataImplementor fullMeta) {
@@ -341,15 +374,29 @@ public class FastBootMetadataBuilder {
     }
 
     private JtaPlatform extractJtaPlatform() {
-        return new JBossStandAloneJtaPlatform();
-        //        JtaPlatformResolver service = standardServiceRegistry.getService( JtaPlatformResolver.class );
-        //        return service.resolveJtaPlatform( this.configurationValues, (ServiceRegistryImplementor) standardServiceRegistry );
+        return QuarkusJtaPlatform.INSTANCE;
     }
 
     private Dialect extractDialect() {
         DialectFactory service = standardServiceRegistry.getService(DialectFactory.class);
         RecordingDialectFactory casted = (RecordingDialectFactory) service;
         return casted.getDialect();
+    }
+
+    private Collection<Integrator> getIntegrators() {
+        LinkedHashSet<Integrator> integrators = new LinkedHashSet<>();
+        integrators.add(new BeanValidationIntegrator());
+        integrators.add(new CollectionCacheInvalidator());
+
+        for (Class<? extends Integrator> integratorClass : additionalIntegrators) {
+            try {
+                integrators.add(integratorClass.getConstructor().newInstance());
+            } catch (Exception e) {
+                throw new IllegalArgumentException("Unable to instantiate integrator " + integratorClass, e);
+            }
+        }
+
+        return integrators;
     }
 
     @SuppressWarnings("rawtypes")

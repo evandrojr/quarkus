@@ -1,34 +1,25 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.arc.processor;
 
-import io.quarkus.arc.ComputingCache;
+import io.quarkus.arc.AlternativePriority;
+import io.quarkus.arc.DefaultBean;
+import io.quarkus.arc.InjectableInstance;
+import io.quarkus.arc.impl.ComputingCache;
 import java.util.Optional;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import javax.annotation.Priority;
+import javax.enterprise.context.Initialized;
+import javax.enterprise.context.control.ActivateRequestContext;
 import javax.enterprise.event.Event;
 import javax.enterprise.event.Observes;
 import javax.enterprise.event.ObservesAsync;
+import javax.enterprise.event.TransactionPhase;
 import javax.enterprise.inject.Alternative;
 import javax.enterprise.inject.Any;
 import javax.enterprise.inject.Default;
 import javax.enterprise.inject.Disposes;
 import javax.enterprise.inject.Instance;
+import javax.enterprise.inject.Intercepted;
 import javax.enterprise.inject.Produces;
 import javax.enterprise.inject.Stereotype;
 import javax.enterprise.inject.Typed;
@@ -65,10 +56,12 @@ public final class DotNames {
     public static final DotName POST_CONSTRUCT = create(PostConstruct.class);
     public static final DotName PRE_DESTROY = create(PreDestroy.class);
     public static final DotName INSTANCE = create(Instance.class);
+    public static final DotName INJECTABLE_INSTANCE = create(InjectableInstance.class);
     public static final DotName PROVIDER = create(Provider.class);
     public static final DotName INJECTION_POINT = create(InjectionPoint.class);
     public static final DotName INTERCEPTOR = create(Interceptor.class);
     public static final DotName INTERCEPTOR_BINDING = create(InterceptorBinding.class);
+    public static final DotName INTERCEPTED = create(Intercepted.class);
     public static final DotName AROUND_INVOKE = create(AroundInvoke.class);
     public static final DotName AROUND_CONSTRUCT = create(AroundConstruct.class);
     public static final DotName PRIORITY = create(Priority.class);
@@ -79,6 +72,8 @@ public final class DotNames {
     public static final DotName EVENT = create(Event.class);
     public static final DotName EVENT_METADATA = create(EventMetadata.class);
     public static final DotName ALTERNATIVE = create(Alternative.class);
+    public static final DotName ALTERNATIVE_PRIORITY = create(AlternativePriority.class);
+    public static final DotName DEFAULT_BEAN = create(DefaultBean.class);
     public static final DotName STEREOTYPE = create(Stereotype.class);
     public static final DotName TYPED = create(Typed.class);
     public static final DotName VETOED = create(Vetoed.class);
@@ -87,6 +82,9 @@ public final class DotNames {
     public static final DotName EXTENSION = create(Extension.class);
     public static final DotName OPTIONAL = create(Optional.class);
     public static final DotName NAMED = create(Named.class);
+    public static final DotName ACTIVATE_REQUEST_CONTEXT = create(ActivateRequestContext.class);
+    public static final DotName TRANSACTION_PHASE = create(TransactionPhase.class);
+    public static final DotName INITIALIZED = create(Initialized.class);
 
     public static final DotName BOOLEAN = create(Boolean.class);
     public static final DotName BYTE = create(Byte.class);
@@ -96,6 +94,7 @@ public final class DotNames {
     public static final DotName INTEGER = create(Integer.class);
     public static final DotName LONG = create(Long.class);
     public static final DotName SHORT = create(Short.class);
+    public static final DotName STRING = create(String.class);
 
     private DotNames() {
     }

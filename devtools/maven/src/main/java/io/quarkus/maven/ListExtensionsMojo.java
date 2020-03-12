@@ -1,23 +1,53 @@
 package io.quarkus.maven;
 
-import org.apache.maven.plugin.AbstractMojo;
+import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugins.annotations.Mojo;
+import org.apache.maven.plugins.annotations.Parameter;
 
-import io.quarkus.cli.commands.AddExtensions;
-import io.quarkus.maven.utilities.MojoUtils;
+import io.quarkus.cli.commands.ListExtensions;
+import io.quarkus.cli.commands.file.BuildFile;
+import io.quarkus.platform.descriptor.QuarkusPlatformDescriptor;
+import io.quarkus.platform.tools.MessageWriter;
 
+/**
+ * List the available extensions.
+ * You can add one or several extensions in one go, with the 2 following mojos:
+ * {@code add-extensions} and {@code add-extension}.
+ * You can list all extension or just installable. Choose between 3 output formats: name, concise and full.
+ */
 @Mojo(name = "list-extensions", requiresProject = false)
-public class ListExtensionsMojo extends AbstractMojo {
+public class ListExtensionsMojo extends BuildFileMojoBase {
+
+    /**
+     * List all extensions or just the installable.
+     */
+    @Parameter(property = "quarkus.extension.all", alias = "quarkus.extension.all", defaultValue = "true")
+    protected boolean all;
+
+    /**
+     * Select the output format among 'name' (display the name only), 'concise' (display name and description) and 'full'
+     * (concise format and version related columns).
+     */
+    @Parameter(property = "quarkus.extension.format", alias = "quarkus.extension.format", defaultValue = "concise")
+    protected String format;
+
+    /**
+     * Search filter on extension list. The format is based on Java Pattern.
+     */
+    @Parameter(property = "searchPattern", alias = "quarkus.extension.searchPattern")
+    protected String searchPattern;
 
     @Override
-    public void execute() {
-        getLog().info("Available extensions:");
-        MojoUtils.loadExtensions().stream()
-                .sorted((o1, o2) -> o1.getName().compareToIgnoreCase(o2.getName()))
-                .forEach(ext -> getLog()
-                        .info("\t * " + ext.getName() + " (" + ext.getGroupId() + ":" + ext.getArtifactId() + ")"));
-
-        getLog().info("\nAdd an extension to your project by adding the dependency to your " +
-                "project or use `mvn quarkus:add-extension -Dextensions=\"name\"`");
+    public void doExecute(BuildFile buildFile, QuarkusPlatformDescriptor platformDescr, MessageWriter log)
+            throws MojoExecutionException {
+        try {
+            new ListExtensions(buildFile, platformDescr)
+                    .all(all)
+                    .format(format)
+                    .search(searchPattern)
+                    .execute();
+        } catch (Exception e) {
+            throw new MojoExecutionException("Failed to list extensions", e);
+        }
     }
 }

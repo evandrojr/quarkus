@@ -1,20 +1,7 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.hibernate.orm.enhancer;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -24,7 +11,6 @@ import java.util.Set;
 import org.hibernate.engine.spi.ManagedEntity;
 import org.hibernate.engine.spi.PersistentAttributeInterceptable;
 import org.hibernate.engine.spi.SelfDirtinessTracker;
-import org.junit.Assert;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
@@ -45,7 +31,7 @@ public class HibernateEntityEnhancerTest {
     @Test
     public void testBytecodeEnhancement() throws IOException, ClassNotFoundException {
 
-        Assert.assertFalse(isEnhanced(Address.class));
+        assertFalse(isEnhanced(Address.class));
 
         ClassReader classReader = new ClassReader(TEST_CLASSNAME);
         ClassWriter writer = new ClassWriter(classReader, ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
@@ -58,7 +44,7 @@ public class HibernateEntityEnhancerTest {
         TestClassLoader cl = new TestClassLoader(getClass().getClassLoader());
         cl.write(TEST_CLASSNAME, modifiedBytecode);
         final Class<?> modifiedClass = cl.loadClass(TEST_CLASSNAME);
-        Assert.assertTrue(isEnhanced(modifiedClass));
+        assertTrue(isEnhanced(modifiedClass));
     }
 
     private boolean isEnhanced(final Class<?> modifiedClass) {

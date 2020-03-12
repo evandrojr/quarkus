@@ -1,30 +1,19 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.runtime;
 
+import java.io.Closeable;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.LockSupport;
 
+import org.eclipse.microprofile.config.spi.ConfigProviderResolver;
 import org.graalvm.nativeimage.ImageInfo;
-import org.jboss.threads.Locks;
 import org.wildfly.common.Assert;
+import org.wildfly.common.lock.Locks;
+
+import com.oracle.svm.core.OS;
 
 import io.quarkus.runtime.graal.DiagnosticPrinter;
+import io.quarkus.runtime.shutdown.ShutdownRecorder;
 import sun.misc.Signal;
 import sun.misc.SignalHandler;
 
@@ -33,7 +22,12 @@ import sun.misc.SignalHandler;
  * setup logic. The base class does some basic error checking.
  */
 @SuppressWarnings("restriction")
-public abstract class Application {
+public abstract class Application implements Closeable {
+
+    // WARNING: do not inject a logger here, it's too early: the log manager has not been properly set up yet
+
+    private static final String DISABLE_SIGNAL_HANDLERS = "DISABLE_SIGNAL_HANDLERS";
+
     private static final int ST_INITIAL = 0;
     private static final int ST_STARTING = 1;
     private static final int ST_STARTED = 2;
@@ -44,8 +38,10 @@ public abstract class Application {
     private final Lock stateLock = Locks.reentrantLock();
     private final Condition stateCond = stateLock.newCondition();
 
+    private String name;
     private int state = ST_INITIAL;
     private volatile boolean shutdownRequested;
+    private static volatile Application currentApplication;
 
     /**
      * Construct a new instance.
@@ -62,7 +58,8 @@ public abstract class Application {
      * @implNote The command line args are not yet used, but at some point we'll want a facility for overriding config and/or
      *           letting the user hook into it.
      */
-    public final void start(@SuppressWarnings("unused") String[] args) {
+    public final void start(String[] args) {
+        currentApplication = this;
         final Lock stateLock = this.stateLock;
         stateLock.lock();
         try {
@@ -112,6 +109,20 @@ public abstract class Application {
 
     protected abstract void doStart(String[] args);
 
+    public final void close() {
+        try {
+            stop();
+        } finally {
+            try {
+                ConfigProviderResolver.instance()
+                        .releaseConfig(
+                                ConfigProviderResolver.instance().getConfig(Thread.currentThread().getContextClassLoader()));
+            } catch (Throwable ignored) {
+
+            }
+        }
+    }
+
     /**
      * Stop the application. If another thread is also trying to stop the application, this method waits for that
      * thread to finish. Returns immediately if the application is already stopped. If an exception is thrown during
@@ -157,12 +168,14 @@ public abstract class Application {
         }
         Timing.staticInitStopped();
         try {
+            ShutdownRecorder.runShutdown();
             doStop();
         } finally {
+            currentApplication = null;
             stateLock.lock();
             try {
                 state = ST_STOPPED;
-                Timing.printStopTime();
+                Timing.printStopTime(name);
                 stateCond.signalAll();
             } finally {
                 stateLock.unlock();
@@ -170,29 +183,46 @@ public abstract class Application {
         }
     }
 
+    public static Application currentApplication() {
+        return currentApplication;
+    }
+
     protected abstract void doStop();
+
+    public void setName(String name) {
+        this.name = name;
+    }
 
     /**
      * Run the application as if it were in a standalone JVM.
      */
     public final void run(String[] args) {
         try {
-            if (ImageInfo.inImageRuntimeCode()) {
+            if (ImageInfo.inImageRuntimeCode() && System.getenv(DISABLE_SIGNAL_HANDLERS) == null) {
                 final SignalHandler handler = new SignalHandler() {
                     @Override
-                    public void handle(final Signal signal) {
-                        System.exit(0);
+                    public void handle(Signal signal) {
+                        System.exit(signal.getNumber() + 0x80);
                     }
                 };
-                Signal.handle(new Signal("INT"), handler);
-                Signal.handle(new Signal("TERM"), handler);
-                Signal.handle(new Signal("QUIT"), new SignalHandler() {
+                final SignalHandler quitHandler = new SignalHandler() {
                     @Override
-                    public void handle(final Signal signal) {
+                    public void handle(Signal signal) {
                         DiagnosticPrinter.printDiagnostics(System.out);
                     }
-                });
+                };
+                handleSignal("INT", handler);
+                handleSignal("TERM", handler);
+                // the HUP and QUIT signals are not defined for the Windows OpenJDK implementation:
+                // https://hg.openjdk.java.net/jdk8u/jdk8u-dev/hotspot/file/7d5c800dae75/src/os/windows/vm/jvm_windows.cpp
+                if (OS.getCurrent() == OS.WINDOWS) {
+                    handleSignal("BREAK", quitHandler);
+                } else {
+                    handleSignal("HUP", handler);
+                    handleSignal("QUIT", quitHandler);
+                }
             }
+
             final ShutdownHookThread shutdownHookThread = new ShutdownHookThread(Thread.currentThread());
             Runtime.getRuntime().addShutdownHook(shutdownHookThread);
             start(args);
@@ -228,6 +258,14 @@ public abstract class Application {
 
     private static IllegalStateException interruptedOnAwaitStop() {
         return new IllegalStateException("Interrupted while waiting for another thread to stop the application");
+    }
+
+    private static void handleSignal(final String signal, final SignalHandler handler) {
+        try {
+            Signal.handle(new Signal(signal), handler);
+        } catch (IllegalArgumentException ignored) {
+            // Do nothing
+        }
     }
 
     class ShutdownHookThread extends Thread {

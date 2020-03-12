@@ -1,26 +1,10 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.arc.processor;
 
 import static org.objectweb.asm.Opcodes.ACC_FINAL;
 import static org.objectweb.asm.Opcodes.ACC_PRIVATE;
 import static org.objectweb.asm.Opcodes.ACC_PUBLIC;
 
-import io.quarkus.arc.ComputingCache;
+import io.quarkus.arc.impl.ComputingCache;
 import io.quarkus.arc.processor.AnnotationLiteralProcessor.Key;
 import io.quarkus.arc.processor.AnnotationLiteralProcessor.Literal;
 import io.quarkus.arc.processor.ResourceOutput.Resource;
@@ -114,14 +98,10 @@ public class AnnotationLiteralGenerator extends AbstractGenerator {
     }
 
     static void createAnnotationLiteral(ClassOutput classOutput, ClassInfo annotationClass,
-            AnnotationInstance annotationInstance, String literalName) {
-        createAnnotationLiteral(classOutput, annotationClass, annotationInstance.values(), literalName);
-    }
-
-    static void createAnnotationLiteral(ClassOutput classOutput, ClassInfo annotationClass, List<AnnotationValue> values,
+            AnnotationInstance annotationInstance,
             String literalName) {
 
-        Map<String, AnnotationValue> annotationValues = values.stream()
+        Map<String, AnnotationValue> annotationValues = annotationInstance.values().stream()
                 .collect(Collectors.toMap(AnnotationValue::name, Function.identity()));
 
         // Ljavax/enterprise/util/AnnotationLiteral<Lcom/foo/MyQualifier;>;Lcom/foo/MyQualifier;
@@ -142,45 +122,12 @@ public class AnnotationLiteralGenerator extends AbstractGenerator {
             if (value == null) {
                 value = method.defaultValue();
             }
-            ResultHandle retValue = null;
             if (value == null) {
-                switch (method.returnType().kind()) {
-                    case CLASS:
-                    case ARRAY:
-                        retValue = valueMethod.loadNull();
-                        break;
-                    case PRIMITIVE:
-                        PrimitiveType primitiveType = method.returnType().asPrimitiveType();
-                        switch (primitiveType.primitive()) {
-                            case BOOLEAN:
-                                retValue = valueMethod.load(false);
-                                break;
-                            case BYTE:
-                            case SHORT:
-                            case INT:
-                                retValue = valueMethod.load(0);
-                                break;
-                            case LONG:
-                                retValue = valueMethod.load(0L);
-                                break;
-                            case FLOAT:
-                                retValue = valueMethod.load(0.0f);
-                                break;
-                            case DOUBLE:
-                                retValue = valueMethod.load(0.0d);
-                                break;
-                            case CHAR:
-                                retValue = valueMethod.load('\u0000');
-                                break;
-                        }
-                        break;
-                    default:
-                        break;
-                }
-            } else {
-                retValue = loadValue(valueMethod, value, annotationClass, method);
+                throw new IllegalStateException(String.format(
+                        "Value is not set for %s.%s(). Most probably an older version of Jandex was used to index an application dependency. Make sure that Jandex 2.1+ is used.",
+                        method.declaringClass().name(), method.name()));
             }
-            valueMethod.returnValue(retValue);
+            valueMethod.returnValue(loadValue(valueMethod, value, annotationClass, method));
         }
         annotationLiteral.close();
         LOGGER.debugf("Annotation literal generated: %s", literalName);
@@ -254,6 +201,13 @@ public class AnnotationLiteralGenerator extends AbstractGenerator {
                     valueMethod.writeArrayValue(retValue, i, valueMethod.load(stringArray[i]));
                 }
                 break;
+            case SHORT:
+                short[] shortArray = value.asShortArray();
+                retValue = valueMethod.newArray(componentType(method), valueMethod.load(shortArray.length));
+                for (int i = 0; i < shortArray.length; i++) {
+                    valueMethod.writeArrayValue(retValue, i, valueMethod.load(shortArray[i]));
+                }
+                break;
             case INTEGER:
                 int[] intArray = value.asIntArray();
                 retValue = valueMethod.newArray(componentType(method), valueMethod.load(intArray.length));
@@ -282,7 +236,20 @@ public class AnnotationLiteralGenerator extends AbstractGenerator {
                     valueMethod.writeArrayValue(retValue, i, valueMethod.load(charArray[i]));
                 }
                 break;
-            // TODO: handle other less common types of array components
+            case FLOAT:
+                float[] floatArray = value.asFloatArray();
+                retValue = valueMethod.newArray(componentType(method), valueMethod.load(floatArray.length));
+                for (int i = 0; i < floatArray.length; i++) {
+                    valueMethod.writeArrayValue(retValue, i, valueMethod.load(floatArray[i]));
+                }
+                break;
+            case DOUBLE:
+                double[] doubleArray = value.asDoubleArray();
+                retValue = valueMethod.newArray(componentType(method), valueMethod.load(doubleArray.length));
+                for (int i = 0; i < doubleArray.length; i++) {
+                    valueMethod.writeArrayValue(retValue, i, valueMethod.load(doubleArray[i]));
+                }
+                break;
             default:
                 // Return empty array for empty arrays and unsupported types
                 // For an empty array the component kind is UNKNOWN
@@ -295,24 +262,51 @@ public class AnnotationLiteralGenerator extends AbstractGenerator {
                                 annotationClass);
                     }
                 }
-                retValue = valueMethod.newArray(componentType(method), valueMethod.load(0));
+                DotName componentName = componentTypeName(method);
+                // Use empty array constants for common component kinds
+                if (DotNames.CLASS.equals(componentName)) {
+                    retValue = valueMethod.readStaticField(FieldDescriptors.ANNOTATION_LITERALS_EMPTY_CLASS_ARRAY);
+                } else if (DotNames.STRING.equals(componentName)) {
+                    retValue = valueMethod.readStaticField(FieldDescriptors.ANNOTATION_LITERALS_EMPTY_STRING_ARRAY);
+                } else if (PrimitiveType.LONG.name().equals(componentName)) {
+                    retValue = valueMethod.readStaticField(FieldDescriptors.ANNOTATION_LITERALS_EMPTY_LONG_ARRAY);
+                } else if (PrimitiveType.INT.name().equals(componentName)) {
+                    retValue = valueMethod.readStaticField(FieldDescriptors.ANNOTATION_LITERALS_EMPTY_INT_ARRAY);
+                } else {
+                    retValue = valueMethod.newArray(componentName.toString(), valueMethod.load(0));
+                }
         }
         return retValue;
     }
 
     static String componentType(MethodInfo method) {
+        return componentTypeName(method).toString();
+    }
+
+    static DotName componentTypeName(MethodInfo method) {
         ArrayType arrayType = method.returnType().asArrayType();
-        return arrayType.component().name().toString();
+        return arrayType.component().name();
     }
 
     static String generatedSharedName(DotName annotationName) {
+        // when the annotation is a java.lang annotation we need to use a different package in which to generate the literal
+        // otherwise a security exception will be thrown when the literal is loaded
+        String nameToUse = isJavaLang(annotationName.toString())
+                ? AbstractGenerator.DEFAULT_PACKAGE + annotationName.withoutPackagePrefix()
+                : annotationName.toString();
+
         // com.foo.MyQualifier -> com.foo.MyQualifier1_Shared_AnnotationLiteral
-        return annotationName + SHARED_SUFFIX + ANNOTATION_LITERAL_SUFFIX;
+        return nameToUse + SHARED_SUFFIX + ANNOTATION_LITERAL_SUFFIX;
+    }
+
+    private static boolean isJavaLang(String s) {
+        return s.startsWith("java.lang");
     }
 
     static String generatedLocalName(String targetPackage, String simpleName, String hash) {
         // com.foo.MyQualifier -> com.bar.MyQualifier_somehashvalue_AnnotationLiteral
-        return targetPackage + "." + simpleName + hash + AnnotationLiteralGenerator.ANNOTATION_LITERAL_SUFFIX;
+        return (isJavaLang(targetPackage) ? AbstractGenerator.DEFAULT_PACKAGE : targetPackage) + "." + simpleName + hash
+                + AnnotationLiteralGenerator.ANNOTATION_LITERAL_SUFFIX;
     }
 
 }

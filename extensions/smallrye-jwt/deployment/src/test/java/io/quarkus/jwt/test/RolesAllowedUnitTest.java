@@ -1,12 +1,7 @@
 package io.quarkus.jwt.test;
 
-import java.io.StringReader;
 import java.net.HttpURLConnection;
 import java.util.HashMap;
-
-import javax.json.Json;
-import javax.json.JsonObject;
-import javax.json.JsonReader;
 
 import org.eclipse.microprofile.jwt.Claims;
 import org.jboss.shrinkwrap.api.ShrinkWrap;
@@ -21,8 +16,12 @@ import io.restassured.RestAssured;
 import io.restassured.response.Response;
 
 public class RolesAllowedUnitTest {
-    private static Class[] testClasses = {
-            RolesEndpoint.class
+    private static Class<?>[] testClasses = {
+            RolesEndpoint.class,
+            AuthenticatedEndpoint.class,
+            PermitAllEndpoint.class,
+            GreetingService.class,
+            TokenUtils.class
     };
     /**
      * The test generated JWT token string
@@ -37,6 +36,10 @@ public class RolesAllowedUnitTest {
     static final QuarkusUnitTest config = new QuarkusUnitTest()
             .setArchiveProducer(() -> ShrinkWrap.create(JavaArchive.class)
                     .addClasses(testClasses)
+                    .addAsResource("publicKey.pem")
+                    .addAsResource("privateKey.pem")
+                    .addAsResource("Token1.json")
+                    .addAsResource("Token2.json")
                     .addAsResource("application.properties"));
 
     @BeforeEach
@@ -58,6 +61,56 @@ public class RolesAllowedUnitTest {
                 .statusCode(HttpURLConnection.HTTP_UNAUTHORIZED);
     }
 
+    @Test()
+    public void testAuthenticatedAnnotation() {
+        RestAssured.given()
+                .when()
+                .queryParam("input", "hello")
+                .get("/endp/authenticated")
+                .then()
+                .statusCode(HttpURLConnection.HTTP_UNAUTHORIZED);
+
+        io.restassured.response.Response response = RestAssured.given().auth()
+                .oauth2(token)
+                .when()
+                .get("/endp/authenticated").andReturn();
+
+        Assertions.assertEquals(HttpURLConnection.HTTP_OK, response.getStatusCode());
+        String replyString = response.body().asString();
+        Assertions.assertEquals("jdoe@example.com", replyString);
+    }
+
+    @Test()
+    public void testAuthenticatedAnnotationOnClass() {
+        RestAssured.given()
+                .when()
+                .queryParam("input", "hello")
+                .get("/authenticated-endpoint/greet")
+                .then()
+                .statusCode(HttpURLConnection.HTTP_UNAUTHORIZED);
+
+        io.restassured.response.Response response = RestAssured.given().auth()
+                .oauth2(token)
+                .when()
+                .get("/authenticated-endpoint/greet").andReturn();
+
+        Assertions.assertEquals(HttpURLConnection.HTTP_OK, response.getStatusCode());
+        String replyString = response.body().asString();
+        Assertions.assertEquals("hello", replyString);
+    }
+
+    @Test()
+    public void testPermitAllOnClass() {
+        io.restassured.response.Response response = RestAssured.given().auth()
+                .oauth2(token)
+                .when()
+                .get("/permit-all-endpoint/greet").andReturn();
+
+        Assertions.assertEquals(HttpURLConnection.HTTP_OK, response.getStatusCode());
+        String replyString = response.body().asString();
+        Assertions.assertEquals("hello", replyString);
+    }
+
     /**
      * Validate a request without an MP-JWT to unsecured endpoint has HTTP_OK with expected response
      */
@@ -74,10 +127,9 @@ public class RolesAllowedUnitTest {
     /**
      * Verify that the injected authenticated principal is as expected
      *
-     * @throws Exception
      */
     @Test()
-    public void callEchoBASIC() throws Exception {
+    public void callEchoBASIC() {
         Response response = RestAssured.given().auth()
                 .basic("jdoe@example.com", "password")
                 .when()
@@ -85,18 +137,14 @@ public class RolesAllowedUnitTest {
                 .get("/endp/echo").andReturn();
 
         Assertions.assertEquals(HttpURLConnection.HTTP_UNAUTHORIZED, response.getStatusCode());
-        String replyString = response.body().asString();
-        // TODO add proper assertion
-        //System.out.println(replyString);
     }
 
     /**
      * Validate a request with MP-JWT succeeds with HTTP_OK, and replies with hello, user={token upn claim}
      *
-     * @throws Exception
      */
     @Test()
-    public void callEcho() throws Exception {
+    public void callEcho() {
         io.restassured.response.Response response = RestAssured.given().auth()
                 .oauth2(token)
                 .when()
@@ -112,10 +160,9 @@ public class RolesAllowedUnitTest {
     /**
      * Validate a request with MP-JWT but no associated role fails with HTTP_FORBIDDEN
      *
-     * @throws Exception
      */
     @Test()
-    public void callEcho2() throws Exception {
+    public void callEcho2() {
         io.restassured.response.Response response = RestAssured.given().auth()
                 .oauth2(token)
                 .when()
@@ -124,17 +171,16 @@ public class RolesAllowedUnitTest {
 
         Assertions.assertEquals(HttpURLConnection.HTTP_FORBIDDEN, response.getStatusCode());
         String replyString = response.body().asString();
-        // TODO add proper assertion
-        //System.out.println(replyString);
+        Assertions.assertEquals("Forbidden", replyString);
     }
 
     /**
      * Validate a request with MP-JWT is able to access checkIsUserInRole with HTTP_OK
      *
-     * @throws Exception
      */
     @Test()
-    public void checkIsUserInRole() throws Exception {
+    public void checkIsUserInRole() {
+
         io.restassured.response.Response response = RestAssured.given().auth()
                 .oauth2(token)
                 .when()
@@ -142,8 +188,7 @@ public class RolesAllowedUnitTest {
 
         Assertions.assertEquals(HttpURLConnection.HTTP_OK, response.getStatusCode());
         String replyString = response.body().asString();
-        // TODO add proper assertion
-        //System.out.println(replyString);
+        Assertions.assertEquals("jdoe@example.com", replyString);
     }
 
     /**
@@ -161,8 +206,8 @@ public class RolesAllowedUnitTest {
 
         Assertions.assertEquals(HttpURLConnection.HTTP_FORBIDDEN, response.getStatusCode());
         String replyString = response.body().asString();
-        // TODO add proper assertion
-        //System.out.println(replyString);
+
+        Assertions.assertEquals("", replyString);
     }
 
     /**
@@ -172,17 +217,17 @@ public class RolesAllowedUnitTest {
      */
     @Test()
     public void echoNeedsToken2Role() throws Exception {
+        String input = "hello";
         String token2 = TokenUtils.generateTokenString("/Token2.json");
         io.restassured.response.Response response = RestAssured.given().auth()
                 .oauth2(token2)
                 .when()
-                .queryParam("input", "hello")
+                .queryParam("input", input)
                 .get("/endp/echoNeedsToken2Role").andReturn();
 
         Assertions.assertEquals(HttpURLConnection.HTTP_OK, response.getStatusCode());
         String replyString = response.body().asString();
-        // TODO add proper assertion
-        //System.out.println(replyString);
+        Assertions.assertEquals(input + ", user=jdoe2@example.com", replyString);
     }
 
     /**
@@ -201,17 +246,15 @@ public class RolesAllowedUnitTest {
 
         Assertions.assertEquals(HttpURLConnection.HTTP_FORBIDDEN, response.getStatusCode());
         String replyString = response.body().asString();
-        // TODO add proper assertion
-        //System.out.println(replyString);
+        Assertions.assertEquals("Forbidden", replyString);
     }
 
     /**
      * Validate a request with MP-JWT SecurityContext.getUserPrincipal() is a JsonWebToken
      *
-     * @throws Exception
      */
     @Test()
-    public void getPrincipalClass() throws Exception {
+    public void getPrincipalClass() {
         io.restassured.response.Response response = RestAssured.given().auth()
                 .oauth2(token)
                 .when()
@@ -227,10 +270,9 @@ public class RolesAllowedUnitTest {
      * This test requires that the server provide a mapping from the group1 grant in the token to a Group1MappedRole
      * application declared role.
      *
-     * @throws Exception
      */
     @Test()
-    public void testNeedsGroup1Mapping() throws Exception {
+    public void testNeedsGroup1Mapping() {
         io.restassured.response.Response response = RestAssured.given().auth()
                 .oauth2(token)
                 .when()
@@ -238,17 +280,15 @@ public class RolesAllowedUnitTest {
 
         Assertions.assertEquals(HttpURLConnection.HTTP_OK, response.getStatusCode());
         String replyString = response.body().asString();
-        // TODO add proper assertion
-        //System.out.println(replyString);
+        Assertions.assertEquals("jdoe@example.com", replyString);
     }
 
     /**
      * Validate that accessing secured method has HTTP_OK and injected JsonWebToken principal
      *
-     * @throws Exception
      */
     @Test()
-    public void getInjectedPrincipal() throws Exception {
+    public void getInjectedPrincipal() {
         io.restassured.response.Response response = RestAssured.given().auth()
                 .oauth2(token)
                 .when()

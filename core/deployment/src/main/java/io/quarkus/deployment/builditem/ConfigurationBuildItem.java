@@ -1,20 +1,19 @@
 package io.quarkus.deployment.builditem;
 
-import org.jboss.builder.item.SimpleBuildItem;
-
-import io.quarkus.deployment.configuration.ConfigDefinition;
+import io.quarkus.builder.item.SimpleBuildItem;
+import io.quarkus.deployment.configuration.BuildTimeConfigurationReader;
 
 /**
  * The build item which carries the build time configuration.
  */
 public final class ConfigurationBuildItem extends SimpleBuildItem {
-    private final ConfigDefinition configDefinition;
+    private final BuildTimeConfigurationReader.ReadResult readResult;
 
-    public ConfigurationBuildItem(final ConfigDefinition configDefinition) {
-        this.configDefinition = configDefinition;
+    public ConfigurationBuildItem(final BuildTimeConfigurationReader.ReadResult readResult) {
+        this.readResult = readResult;
     }
 
-    public ConfigDefinition getConfigDefinition() {
-        return configDefinition;
+    public BuildTimeConfigurationReader.ReadResult getReadResult() {
+        return readResult;
     }
 }

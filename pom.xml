@@ -1,28 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  ~ Copyright 2018 Red Hat, Inc.
-  ~
-  ~ Licensed under the Apache License, Version 2.0 (the "License");
-  ~ you may not use this file except in compliance with the License.
-  ~ You may obtain a copy of the License at
-  ~
-  ~     http://www.apache.org/licenses/LICENSE-2.0
-  ~
-  ~ Unless required by applicable law or agreed to in writing, software
-  ~ distributed under the License is distributed on an "AS IS" BASIS,
-  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-  ~ See the License for the specific language governing permissions and
-  ~ limitations under the License.
-  -->
-
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <parent>
         <groupId>org.jboss</groupId>
         <artifactId>jboss-parent</artifactId>
-        <version>32</version>
+        <version>36</version>
     </parent>
 
     <groupId>io.quarkus</groupId>
@@ -49,41 +33,51 @@
     <properties>
         <graalvmHome>${env.GRAALVM_HOME}</graalvmHome>
         <postgres.url>jdbc:postgresql:hibernate_orm_test</postgres.url>
+
+        <nexus-staging-maven-plugin.version>1.6.8</nexus-staging-maven-plugin.version>
     </properties>
 
     <modules>
-        <module>bom</module>
+      
+        <!-- External projects -->
+        <module>independent-projects/ide-config</module>
+        <module>independent-projects/arc</module>
+        <module>independent-projects/bootstrap</module>
+        <module>independent-projects/tools</module>
+        <module>independent-projects/qute</module>
+       
+        <!-- BOMs and parent POM -->
+        <module>bom/runtime</module>
+        <module>bom/deployment</module>
         <module>build-parent</module>
 
         <!-- Core components -->
         <module>core</module>
         <module>test-framework</module>
 
-        <!-- Integration Tests -->
-        <module>integration-tests</module>
-
         <!-- Extensions -->
         <module>extensions</module>
 
-        <!-- External projects -->
-        <module>independent-projects/arc</module>
-
         <!-- Devtools (Maven, cli, gradle) -->
+        <!-- MUST BE BUILT AFTER EXTENSIONS BUT BEFORE IT -->
+        <!-- the tools are generating the JSON descriptor for the BOM -->
+        <!-- relying on the fact that the extension descriptor, generated as part of an extension build, is available -->
         <module>devtools</module>
+
+        <!-- Integration Tests -->
+        <module>integration-tests</module>
 
         <!-- Misc. -->
         <module>docs</module>
-
-        <!-- Do not add modules after war-launcher. JVM state will fail CI -->
-        <module>war-launcher</module>
     </modules>
 
     <repositories>
         <repository>
             <id>central</id>
             <name>Maven Repository Switchboard</name>
-            <url>http://repo.maven.apache.org/maven2</url>
+            <url>https://repo.maven.apache.org/maven2</url>
         </repository>
+<<<<<<< HEAD
         <repository>
             <id>jboss</id>
             <url>http://repository.jboss.org/nexus/content/groups/public/</url>
@@ -106,6 +100,9 @@
             <layout>default</layout>
         </repository>
     </repositories>
+=======
+   </repositories>
+>>>>>>> quarkusio-master-Oracle
 
     <distributionManagement>
         <snapshotRepository>
@@ -126,12 +123,13 @@
                     <plugin>
                         <groupId>org.sonatype.plugins</groupId>
                         <artifactId>nexus-staging-maven-plugin</artifactId>
-                        <version>1.6.3</version>
+                        <version>${nexus-staging-maven-plugin.version}</version>
                         <extensions>true</extensions>
                         <configuration>
                             <nexusUrl>https://oss.sonatype.org/</nexusUrl>
                             <serverId>ossrh</serverId>
-                            <autoReleaseAfterClose>true</autoReleaseAfterClose>
+                            <autoReleaseAfterClose>false</autoReleaseAfterClose>
+                            <keepStagingRepositoryOnCloseRuleFailure>true</keepStagingRepositoryOnCloseRuleFailure>
                         </configuration>
                     </plugin>
                     <plugin>
@@ -186,6 +184,17 @@
                     </plugin>
                 </plugins>
             </build>
+        </profile>
+        <profile>
+            <id>tcks</id>
+            <activation>
+                <property>
+                    <name>tcks</name>
+                </property>
+            </activation>
+            <modules>
+                <module>tcks</module>
+            </modules>
         </profile>
     </profiles>
 

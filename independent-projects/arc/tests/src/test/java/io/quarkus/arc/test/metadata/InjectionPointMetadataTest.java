@@ -1,24 +1,8 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.arc.test.metadata;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.quarkus.arc.Arc;
 import io.quarkus.arc.ArcContainer;
@@ -27,23 +11,25 @@ import java.lang.annotation.Annotation;
 import java.util.Set;
 import javax.enterprise.context.Dependent;
 import javax.enterprise.inject.Default;
+import javax.enterprise.inject.Instance;
 import javax.enterprise.inject.spi.AnnotatedConstructor;
 import javax.enterprise.inject.spi.AnnotatedField;
 import javax.enterprise.inject.spi.AnnotatedParameter;
 import javax.enterprise.inject.spi.Bean;
 import javax.enterprise.inject.spi.BeanManager;
 import javax.enterprise.inject.spi.InjectionPoint;
+import javax.enterprise.util.TypeLiteral;
 import javax.inject.Inject;
 import javax.inject.Singleton;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 public class InjectionPointMetadataTest {
 
-    @Rule
+    @RegisterExtension
     public ArcTestContainer container = new ArcTestContainer(Controller.class, Controlled.class);
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({ "unchecked", "rawtypes", "serial" })
     @Test
     public void testInjectionPointMetadata() {
         ArcContainer arc = Arc.container();
@@ -83,7 +69,7 @@ public class InjectionPointMetadataTest {
         // Constructor
         InjectionPoint ctorInjectionPoint = controller.controlledCtor.injectionPoint;
         assertNotNull(ctorInjectionPoint);
-        assertEquals(Controlled.class, methodInjectionPoint.getType());
+        assertEquals(Controlled.class, ctorInjectionPoint.getType());
         assertTrue(ctorInjectionPoint.getAnnotated() instanceof AnnotatedParameter);
         assertEquals(bean, ctorInjectionPoint.getBean());
         AnnotatedParameter<Controller> ctorParam = (AnnotatedParameter<Controller>) ctorInjectionPoint.getAnnotated();
@@ -94,6 +80,27 @@ public class InjectionPointMetadataTest {
         assertEquals(1, ctorParam.getAnnotations().size());
         assertTrue(ctorParam.getDeclaringCallable() instanceof AnnotatedConstructor);
         assertEquals(Controller.class, ctorParam.getDeclaringCallable().getJavaMember().getDeclaringClass());
+
+        // Instance
+        InjectionPoint instanceInjectionPoint = controller.instanceControlled.get().injectionPoint;
+        assertNotNull(instanceInjectionPoint);
+        assertEquals(Controlled.class, instanceInjectionPoint.getType());
+        qualifiers = instanceInjectionPoint.getQualifiers();
+        assertEquals(1, qualifiers.size());
+        assertEquals(Default.class, qualifiers.iterator().next().annotationType());
+        bean = instanceInjectionPoint.getBean();
+        assertNotNull(bean);
+        assertTrue(bean.getTypes().stream().anyMatch(t -> t.equals(Controller.class)));
+        assertNotNull(instanceInjectionPoint.getAnnotated());
+        assertTrue(instanceInjectionPoint.getAnnotated() instanceof AnnotatedField);
+        annotatedField = (AnnotatedField) instanceInjectionPoint.getAnnotated();
+        assertEquals("instanceControlled", annotatedField.getJavaMember().getName());
+        assertEquals(new TypeLiteral<Instance<Controlled>>() {
+        }.getType(), annotatedField.getBaseType());
+        assertTrue(annotatedField.isAnnotationPresent(Inject.class));
+        assertTrue(annotatedField.getAnnotation(Singleton.class) == null);
+        assertTrue(annotatedField.getAnnotations(Singleton.class).isEmpty());
+        assertEquals(1, annotatedField.getAnnotations().size());
     }
 
     @Singleton
@@ -105,6 +112,9 @@ public class InjectionPointMetadataTest {
         Controlled controlledMethod;
 
         Controlled controlledCtor;
+
+        @Inject
+        Instance<Controlled> instanceControlled;
 
         @Inject
         public Controller(BeanManager beanManager, @Singleton Controlled controlled) {

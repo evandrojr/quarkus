@@ -1,20 +1,6 @@
-/*
- * Copyright 2019 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.test.common;
+
+import java.util.Map;
 
 /**
  * Manage the lifecycle of a test resource, for instance a H2 test server.
@@ -31,11 +17,29 @@ public interface QuarkusTestResourceLifecycleManager {
 
     /**
      * Start the test resource.
+     *
+     * @return A map of system properties that should be set for the running test
      */
-    void start();
+    Map<String, String> start();
 
     /**
      * Stop the test resource.
      */
     void stop();
+
+    /**
+     * Allow each resource to provide custom injection of fields of the test class
+     */
+    default void inject(Object testInstance) {
+    }
+
+    /**
+     * If multiple Test Resources are specified,
+     * this control the order of which they will be executed.
+     * 
+     * @return The order to be executed. The larger the number, the later the Resource is invoked.
+     */
+    default int order() {
+        return 0;
+    }
 }

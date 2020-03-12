@@ -2,8 +2,7 @@ package io.quarkus.smallrye.reactivemessaging.kafka.deployment;
 
 import io.quarkus.deployment.annotations.BuildProducer;
 import io.quarkus.deployment.annotations.BuildStep;
-import io.quarkus.deployment.builditem.CombinedIndexBuildItem;
-import io.quarkus.deployment.builditem.substrate.ReflectiveClassBuildItem;
+import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem;
 import io.vertx.kafka.client.serialization.BufferDeserializer;
 import io.vertx.kafka.client.serialization.BufferSerializer;
 import io.vertx.kafka.client.serialization.JsonArrayDeserializer;
@@ -24,10 +23,9 @@ public class KafkaCodecProcessor {
     };
 
     @BuildStep
-    public void build(CombinedIndexBuildItem indexBuildItem, BuildProducer<ReflectiveClassBuildItem> reflectiveClass) {
-
+    public void build(BuildProducer<ReflectiveClassBuildItem> reflectiveClass) {
         for (Class<?> s : BUILT_INS) {
-            reflectiveClass.produce(new ReflectiveClassBuildItem(true, false, s.toString()));
+            reflectiveClass.produce(new ReflectiveClassBuildItem(true, false, s.getName()));
         }
     }
 }

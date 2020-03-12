@@ -1,19 +1,3 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.smallrye.health.test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -21,10 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import java.util.ArrayList;
 import java.util.List;
 
+import javax.enterprise.inject.Any;
 import javax.enterprise.inject.Instance;
 import javax.inject.Inject;
 
-import org.eclipse.microprofile.health.Health;
 import org.eclipse.microprofile.health.HealthCheck;
 import org.eclipse.microprofile.health.HealthCheckResponse;
 import org.jboss.shrinkwrap.api.ShrinkWrap;
@@ -44,11 +28,13 @@ public class FailingUnitTest {
                     .addClasses(FailingHealthCheck.class)
                     .addAsManifestResource(EmptyAsset.INSTANCE, "beans.xml"));
     @Inject
-    @Health
+    @Any
     Instance<HealthCheck> checks;
 
     @Test
     public void testHealthServlet() {
+        RestAssured.when().get("/health/live").then().statusCode(503);
+        RestAssured.when().get("/health/ready").then().statusCode(503);
         RestAssured.when().get("/health").then().statusCode(503);
     }
 

@@ -4,36 +4,34 @@ public enum ConfigPhase {
     /**
      * Values are read and available for usage at build time.
      */
-    BUILD_TIME(true, false, false, false),
+    BUILD_TIME(true, false, false, "Build time"),
     /**
      * Values are read and available for usage at build time, and available on a read-only basis at run time.
      */
-    BUILD_AND_RUN_TIME_FIXED(true, true, false, false),
+    BUILD_AND_RUN_TIME_FIXED(true, true, false, "Build time and run time fixed"),
+
     /**
-     * Values are read and available for usage at run time during static initialization. In a JVM image, they will
-     * be read on every execution; in a native image, they will only be read during the building of the image.
-     *
-     * @deprecated We are removing static init time configuration processing.
+     * Values are read and available for usage at run time and are re-read on each program execution. These values
+     * are used to configure ConfigSourceProvider implementations
      */
-    @Deprecated
-    RUN_TIME_STATIC(false, true, true, false),
+    BOOTSTRAP(false, true, true, "Bootstrap"),
+
     /**
      * Values are read and available for usage at run time and are re-read on each program execution.
      */
-    RUN_TIME(false, true, true, true),
+    RUN_TIME(false, true, true, "Run time"),
     ;
 
     private final boolean availableAtBuild;
     private final boolean availableAtRun;
-    private final boolean readAtStaticInit;
     private final boolean readAtMain;
+    private final String name;
 
-    ConfigPhase(final boolean availableAtBuild, final boolean availableAtRun, final boolean readAtStaticInit,
-            final boolean readAtMain) {
+    ConfigPhase(final boolean availableAtBuild, final boolean availableAtRun, final boolean readAtMain, final String name) {
         this.availableAtBuild = availableAtBuild;
         this.availableAtRun = availableAtRun;
-        this.readAtStaticInit = readAtStaticInit;
         this.readAtMain = readAtMain;
+        this.name = name;
     }
 
     public boolean isAvailableAtBuild() {
@@ -45,10 +43,15 @@ public enum ConfigPhase {
     }
 
     public boolean isReadAtStaticInit() {
-        return readAtStaticInit;
+        return isAvailableAtBuild() && isAvailableAtRun();
     }
 
     public boolean isReadAtMain() {
         return readAtMain;
+    }
+
+    @Override
+    public String toString() {
+        return name;
     }
 }

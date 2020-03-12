@@ -1,25 +1,36 @@
 package io.quarkus.extest;
 
+import static org.hamcrest.Matchers.is;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import javax.inject.Inject;
 
 import org.jboss.shrinkwrap.api.ShrinkWrap;
 import org.jboss.shrinkwrap.api.spec.JavaArchive;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
-import io.quarkus.extest.runtime.NestedConfig;
-import io.quarkus.extest.runtime.ObjectOfValue;
-import io.quarkus.extest.runtime.ObjectValueOf;
-import io.quarkus.extest.runtime.TestBuildAndRunTimeConfig;
-import io.quarkus.extest.runtime.TestRunTimeConfig;
+import io.quarkus.extest.runtime.config.MyEnum;
+import io.quarkus.extest.runtime.config.NestedConfig;
+import io.quarkus.extest.runtime.config.ObjectOfValue;
+import io.quarkus.extest.runtime.config.ObjectValueOf;
+import io.quarkus.extest.runtime.config.TestBuildAndRunTimeConfig;
+import io.quarkus.extest.runtime.config.TestRunTimeConfig;
 import io.quarkus.test.QuarkusUnitTest;
+import io.restassured.RestAssured;
 
 /**
  * Test driver for the test-extension
@@ -39,18 +50,17 @@ public class ConfiguredBeanTest {
      */
     @Test
     public void validateConfiguredBean() {
-        System.out.printf("validateConfiguredBean, %s\n", configuredBean);
+        System.out.printf("validateConfiguredBean, %s%n", configuredBean);
         Assertions.assertNotNull(configuredBean);
         Assertions.assertNotNull(configuredBean.getBuildTimeConfig());
         Assertions.assertNotNull(configuredBean.getRunTimeConfig());
+        Assertions.assertEquals("huhu", configuredBean.getFooRuntimeConfig().bar);
     }
 
     /**
      * Validate that the TestBuildAndRunTimeConfig is the same as seen at build time
-     * Currently disabled due to https://github.com/jbossas/quarkus/issues/962
      */
     @Test
-    @Disabled("https://github.com/jbossas/quarkus/issues/962")
     public void validateBuildTimeConfig() {
         TestBuildAndRunTimeConfig buildTimeConfig = configuredBean.getBuildTimeConfig();
         Assertions.assertEquals("StringBasedValue", buildTimeConfig.btSBV.getValue(),
@@ -105,6 +115,15 @@ public class ConfiguredBeanTest {
             throw new IllegalStateException(
                     "buildTimeConfig.allValues.simpleMap.size != 2; " + buildTimeConfig.allValues.nestedConfigMap.size());
         }
+        Assertions.assertNotEquals("${java.vm.version}", buildTimeConfig.allValues.expandedDefault);
+        Assertions.assertFalse(buildTimeConfig.allValues.expandedDefault.isEmpty());
+        List<MyEnum> enums = Arrays.asList(MyEnum.OPTIONAL, MyEnum.ENUM_ONE, MyEnum.Enum_Two);
+        Assertions.assertEquals(enums, configuredBean.getBuildTimeConfig().myEnums);
+        Assertions.assertEquals(MyEnum.OPTIONAL, configuredBean.getBuildTimeConfig().myEnum);
+        List<Integer> mapValues = new ArrayList<>(Arrays.asList(1, 2));
+        List<Integer> actualMapValues = new ArrayList<>(configuredBean.getBuildTimeConfig().mapOfNumbers.values());
+        Assertions.assertEquals(mapValues, actualMapValues);
+
     }
 
     /**
@@ -149,6 +168,8 @@ public class ConfiguredBeanTest {
         Assertions.assertEquals(1, runTimeConfig.allValues.longList.get(0).longValue());
         Assertions.assertEquals(2, runTimeConfig.allValues.longList.get(1).longValue());
         Assertions.assertEquals(3, runTimeConfig.allValues.longList.get(2).longValue());
+        Assertions.assertNotEquals("${java.vm.version}", runTimeConfig.allValues.expandedDefault);
+        Assertions.assertFalse(runTimeConfig.allValues.expandedDefault.isEmpty());
     }
 
     /**
@@ -184,5 +205,90 @@ public class ConfiguredBeanTest {
         Assertions.assertEquals(Arrays.asList("value1", "value2", "value3"), stringListMap.get("key1"));
         Assertions.assertEquals(Arrays.asList("value4", "value5"), stringListMap.get("key2"));
         Assertions.assertEquals(Collections.singletonList("value6"), stringListMap.get("key3"));
+
+        //quarkus.rt.leaf-map.key.first=first-key-value
+        //quarkus.rt.leaf-map.key.second=second-key-value
+
+        final Map<String, Map<String, String>> leafMap = runTimeConfig.leafMap;
+        Assertions.assertEquals("first-key-value", leafMap.get("key").get("first"));
+        Assertions.assertEquals("second-key-value", leafMap.get("key").get("second"));
+
+        //quarkus.rt.config-group-map.key.group.nested-value=value
+        //quarkus.rt.config-group-map.key.group.oov=value2.1+value2.2
+        final Map<String, Map<String, NestedConfig>> configGroupMap = runTimeConfig.configGroupMap;
+        NestedConfig nestedConfigFromMap = configGroupMap.get("key").get("group");
+        Assertions.assertEquals("value", nestedConfigFromMap.nestedValue);
+        Assertions.assertEquals(new ObjectOfValue("value2.1", "value2.2"), nestedConfigFromMap.oov);
+    }
+
+    /**
+     * Test the RuntimeXmlConfigService using old school sockets
+     */
+    @Test
+    public void testRuntimeXmlConfigService() throws Exception {
+        // From config.xml
+        Socket socket = new Socket("localhost", 12345);
+        OutputStream os = socket.getOutputStream();
+        os.write("testRuntimeXmlConfigService\n".getBytes("UTF-8"));
+        os.flush();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))) {
+            String reply = reader.readLine();
+            Assertions.assertEquals("testRuntimeXmlConfigService-ack", reply);
+        } finally {
+            os.close();
+            socket.close();
+        }
+    }
+
+    @Test
+    public void verifyCommandServlet() {
+        RestAssured.when().get("/commands/ping").then()
+                .body(is("/ping-ack"));
+    }
+
+    @Test
+    public void testHyphenatedEnumConversion() {
+        List<MyEnum> enums = Arrays.asList(MyEnum.ENUM_ONE, MyEnum.Enum_Two);
+        Assertions.assertEquals(enums, configuredBean.getRunTimeConfig().myEnums);
+        Assertions.assertEquals(MyEnum.Enum_Two, configuredBean.getRunTimeConfig().myEnum);
+        Assertions.assertEquals(MyEnum.OPTIONAL, configuredBean.getRunTimeConfig().myOptionalEnums.get());
+        Assertions.assertEquals(MyEnum.ENUM_ONE, configuredBean.getRunTimeConfig().noHyphenateFirstEnum.get());
+        Assertions.assertEquals(MyEnum.Enum_Two, configuredBean.getRunTimeConfig().noHyphenateSecondEnum.get());
+    }
+
+    @Test
+    public void testConversionUsingConvertWith() {
+        Assertions.assertTrue(configuredBean.getRunTimeConfig().primitiveBoolean);
+        Assertions.assertFalse(configuredBean.getRunTimeConfig().objectBoolean);
+        Assertions.assertEquals(2, configuredBean.getRunTimeConfig().primitiveInteger);
+        Assertions.assertEquals(9, configuredBean.getRunTimeConfig().objectInteger);
+        List<Integer> oneToNine = IntStream.range(1, 10).mapToObj(Integer::new).collect(Collectors.toList());
+        Assertions.assertEquals(oneToNine, configuredBean.getRunTimeConfig().oneToNine);
+        List<Integer> mapValues = new ArrayList<>(Arrays.asList(1, 2));
+        List<Integer> actualMapValues = new ArrayList<>(configuredBean.getRunTimeConfig().mapOfNumbers.values());
+        Assertions.assertEquals(mapValues, actualMapValues);
+    }
+
+    @Test
+    public void testBtrtMapOfMap() {
+        Map<String, Map<String, String>> mapMap = configuredBean.getBuildTimeConfig().mapMap;
+        Assertions.assertFalse(mapMap.containsKey("inner-key"));
+        Assertions.assertTrue(mapMap.containsKey("outer-key"));
+        Map<String, String> map = mapMap.get("outer-key");
+        Assertions.assertTrue(map.containsKey("inner-key"));
+        Assertions.assertFalse(map.containsKey("outer-key"));
+        Assertions.assertEquals("1234", map.get("inner-key"));
+    }
+
+    @Test
+    public void testRtMapOfMap() {
+        Map<String, Map<String, String>> mapMap = configuredBean.getRunTimeConfig().mapMap;
+        Assertions.assertFalse(mapMap.containsKey("inner-key"));
+        Assertions.assertTrue(mapMap.containsKey("outer-key"));
+        Map<String, String> map = mapMap.get("outer-key");
+        Assertions.assertTrue(map.containsKey("inner-key"));
+        Assertions.assertFalse(map.containsKey("outer-key"));
+        Assertions.assertEquals("1234", map.get("inner-key"));
     }
 }

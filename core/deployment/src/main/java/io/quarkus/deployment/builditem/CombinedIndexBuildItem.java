@@ -1,24 +1,21 @@
-/*
- * Copyright 2018 Red Hat, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package io.quarkus.deployment.builditem;
 
-import org.jboss.builder.item.SimpleBuildItem;
 import org.jboss.jandex.IndexView;
 
+import io.quarkus.builder.item.SimpleBuildItem;
+
+/**
+ * An index of application classes which is built from archives and dependencies that contain a certain marker file.
+ * These files include but are not limited to - beans.xml, jandex.idx and config properties.
+ * Additional marker files can be declared via {@link AdditionalApplicationArchiveMarkerBuildItem}.
+ * Alternatively, you can index a dependency through {@link IndexDependencyBuildItem}.
+ *
+ * Compared to {@code BeanArchiveIndexBuildItem}, this index doesn't contain all CDI-related information.
+ * On the other hand, it can contain classes from archives/dependencies that had no CDI component declared within them.
+ *
+ * @see AdditionalApplicationArchiveMarkerBuildItem
+ * @see IndexDependencyBuildItem
+ */
 public final class CombinedIndexBuildItem extends SimpleBuildItem {
 
     private final IndexView index;
